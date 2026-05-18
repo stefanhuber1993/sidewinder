@@ -14,6 +14,7 @@ R_SET_CONSTANT_FORCE = 0x05
 R_EFFECT_OPERATION   = 0x0a
 R_DEVICE_CONTROL     = 0x0c
 R_DEVICE_GAIN        = 0x0d
+R_POSITION           = 0x08  # Report 8: direct X/Y position command (-127..127)
 
 
 def find_ep_out(dev):
@@ -136,22 +137,21 @@ def main():
             time.sleep(0.04)
         stop_effect(dev, ep, block);  time.sleep(0.4)
 
-        # ── Spring positioning ───────────────────────────────────────────
-        # Without mechanical spring, this actively moves the stick to the target
-        print("Spring: center")
-        spring(dev, ep, block, x_center=0, y_center=0)
+        # ── Direct position test (Report 8: X/Y position command) ───────
+        print("Direct position: center")
+        out(dev, ep, [R_POSITION, 0, 0])
         time.sleep(2.0)
 
-        print("Spring: top-right corner")
-        spring(dev, ep, block, x_center=100, y_center=-100)
+        print("Direct position: top-right")
+        out(dev, ep, [R_POSITION, 100, -100 & 0xFF])
         time.sleep(2.0)
 
-        print("Spring: bottom-left corner")
-        spring(dev, ep, block, x_center=-100, y_center=100)
+        print("Direct position: bottom-left")
+        out(dev, ep, [R_POSITION, -100 & 0xFF, 100])
         time.sleep(2.0)
 
-        print("Spring: back to center")
-        spring(dev, ep, block, x_center=0, y_center=0)
+        print("Direct position: back to center")
+        out(dev, ep, [R_POSITION, 0, 0])
         time.sleep(2.0)
 
         # ── Accelerating left/right slams ────────────────────────────────
