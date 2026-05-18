@@ -67,7 +67,7 @@ def push_xy(dev, ep, block, x, y):
     push(dev, ep, block, angle_deg, magnitude)
 
 
-def spring(dev, ep, block, x_center=0, y_center=0, stiffness=0x70):
+def spring(dev, ep, block, x_center=0, y_center=0, stiffness=0xFF):
     """
     Spring effect that holds the stick at (x_center, y_center).
     x_center, y_center: -127 to 127 (full stick range).
@@ -86,12 +86,12 @@ def spring(dev, ep, block, x_center=0, y_center=0, stiffness=0x70):
         0x00, 0x00,
         0x00, 0x00,
     ])
-    # Set Condition for X axis (parameter block offset=0, axes=X+Y → byte=0x30)
+    # Set Condition for X axis (parameter block offset=0)
     xc = x_center & 0xFF
-    out(dev, ep, [R_SET_CONDITION, block, 0x30, xc, stiffness, stiffness, 0xFF, 0xFF, 0x00])
-    # Set Condition for Y axis (parameter block offset=1 → byte=0x31)
+    out(dev, ep, [R_SET_CONDITION, block, 0x00, xc, stiffness, stiffness, 0xFF, 0xFF, 0x00])
+    # Set Condition for Y axis (parameter block offset=1)
     yc = y_center & 0xFF
-    out(dev, ep, [R_SET_CONDITION, block, 0x31, yc, stiffness, stiffness, 0xFF, 0xFF, 0x00])
+    out(dev, ep, [R_SET_CONDITION, block, 0x01, yc, stiffness, stiffness, 0xFF, 0xFF, 0x00])
     play_effect(dev, ep, block)
 
 
