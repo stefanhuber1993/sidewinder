@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Sidewinder FF2 - Force feedback patterns demo.
+Sidewinder FF2 - Force feedback demo.
+No mechanical spring — FF has full authority over stick position.
 Run: sudo venv/bin/python3 demo.py
 """
 import usb.core, usb.util, time, math
@@ -8,6 +9,7 @@ import usb.core, usb.util, time, math
 VID, PID, IFACE = 0x045e, 0x001b, 0
 
 R_SET_EFFECT         = 0x01
+R_SET_CONDITION      = 0x03
 R_SET_CONSTANT_FORCE = 0x05
 R_EFFECT_OPERATION   = 0x0a
 R_DEVICE_CONTROL     = 0x0c
@@ -26,30 +28,71 @@ def find_ep_out(dev):
 def out(dev, ep, data):
     dev.write(ep, bytes(data), 1000)
 
+def stop_effect(dev, ep, block):
+    out(dev, ep, [R_EFFECT_OPERATION, block, 0x03, 0x00])
 
-def magnitude(dev, ep, block, val):
-    """Send constant force magnitude and restart effect so device picks it up. val: -255 to +255."""
-    val = max(-255, min(255, int(val)))
-    raw = val if val >= 0 else val + 65536   # two's complement uint16
-    out(dev, ep, [R_EFFECT_OPERATION, block, 0x03, 0x00])   # stop
-    out(dev, ep, [R_SET_CONSTANT_FORCE, block, raw & 0xFF, (raw >> 8) & 0xFF])
-    out(dev, ep, [R_EFFECT_OPERATION, block, 0x01, 0x01])   # restart
+def play_effect(dev, ep, block):
+    out(dev, ep, [R_EFFECT_OPERATION, block, 0x01, 0x01])
 
 
-def set_effect(dev, ep, block, axes=0x01, dir0=0x00, dir1=0x00):
-    """Upload constant force effect descriptor. axes byte: bit0=X, bit1=Y, bit2=dir_enable."""
+def push(dev, ep, block, angle_deg, magnitude=255):
+    """
+    Push stick in a direction and hold it there.
+    angle_deg: 0=forward, 90=right, 180=back, 270=left
+    magnitude: 0-255
+    """
+    direction_byte = int(angle_deg / 360.0 * 256) % 256
+    stop_effect(dev, ep, block)
     out(dev, ep, [
         R_SET_EFFECT,
-        block, 0x01,          # block index, effect type = Constant Force
-        0xff, 0x7f,            # duration = 32767 ms
-        0x00, 0x00,            # trigger repeat = 0
-        0x00, 0x00,            # sample period = 0
-        0xff,                  # gain = max
-        0x00,                  # trigger button = none
-        axes,                  # axes / direction enable
-        dir0, dir1,            # direction bytes
-        0x00, 0x00,            # start delay = 0
+        block, 0x01,           # Constant Force
+        0xff, 0x7f,            # Duration 32s
+        0x00, 0x00,            # Trigger repeat
+        0x00, 0x00,            # Sample period
+        0xff,                  # Gain max
+        0x00,                  # No trigger button
+        0x07,                  # X+Y axes enabled, direction_enable=1
+        direction_byte, 0x00,  # Direction
+        0x00, 0x00,            # No delay
     ])
+    out(dev, ep, [R_SET_CONSTANT_FORCE, block, magnitude & 0xFF, 0x00])
+    play_effect(dev, ep, block)
+
+
+def push_xy(dev, ep, block, x, y):
+    """Push via X/Y components (-255..255 each). Converts to polar internally."""
+    angle_rad = math.atan2(x, -y)          # 0=forward(−y), 90°=right(+x)
+    angle_deg = math.degrees(angle_rad) % 360
+    magnitude = min(255, int(math.sqrt(x*x + y*y)))
+    push(dev, ep, block, angle_deg, magnitude)
+
+
+def spring(dev, ep, block, x_center=0, y_center=0, stiffness=0x70):
+    """
+    Spring effect that holds the stick at (x_center, y_center).
+    x_center, y_center: -127 to 127 (full stick range).
+    Without a mechanical spring, this actively positions the stick.
+    """
+    stop_effect(dev, ep, block)
+    out(dev, ep, [
+        R_SET_EFFECT,
+        block, 0x08,           # Spring (condition effect)
+        0xff, 0x7f,            # Duration 32s
+        0x00, 0x00,
+        0x00, 0x00,
+        0xff,                  # Gain max
+        0x00,
+        0x03,                  # X+Y axes, no direction (condition handles it)
+        0x00, 0x00,
+        0x00, 0x00,
+    ])
+    # Set Condition for X axis (parameter block offset=0, axes=X+Y → byte=0x30)
+    xc = x_center & 0xFF
+    out(dev, ep, [R_SET_CONDITION, block, 0x30, xc, stiffness, stiffness, 0xFF, 0xFF, 0x00])
+    # Set Condition for Y axis (parameter block offset=1 → byte=0x31)
+    yc = y_center & 0xFF
+    out(dev, ep, [R_SET_CONDITION, block, 0x31, yc, stiffness, stiffness, 0xFF, 0xFF, 0x00])
+    play_effect(dev, ep, block)
 
 
 def main():
@@ -64,62 +107,64 @@ def main():
     ep = find_ep_out(dev)
 
     try:
-        out(dev, ep, [R_DEVICE_CONTROL, 0x01])   # Enable actuators
+        out(dev, ep, [R_DEVICE_CONTROL, 0x01])
         time.sleep(0.1)
-        out(dev, ep, [R_DEVICE_GAIN, 0xff])       # Max gain
+        out(dev, ep, [R_DEVICE_GAIN, 0xff])
         time.sleep(0.1)
-
         block = 1
-        set_effect(dev, ep, block)
-        magnitude(dev, ep, block, 0)
-        out(dev, ep, [R_EFFECT_OPERATION, block, 0x01, 0x01])  # Start
-        time.sleep(0.1)
 
-        # ── Pattern 1: Slam left, hold, slam right, hold ─────────────────
-        print("Left / right slams")
-        for _ in range(4):
-            magnitude(dev, ep, block,  255);  time.sleep(0.8)
-            magnitude(dev, ep, block, -255);  time.sleep(0.8)
-        magnitude(dev, ep, block, 0);  time.sleep(0.4)
+        # ── Slam to each corner ──────────────────────────────────────────
+        print("Corners: right → forward → left → back")
+        for angle in [90, 0, 270, 180]:
+            push(dev, ep, block, angle)
+            time.sleep(1.0)
+        stop_effect(dev, ep, block);  time.sleep(0.4)
 
-        # ── Pattern 2: Slow sine sweep — full travel ─────────────────────
-        print("Slow sine sweep")
+        # ── Slow circular sweep ──────────────────────────────────────────
+        print("Slow circle")
+        angle = 0.0
+        push(dev, ep, block, angle)
         t0 = time.time()
         while time.time() - t0 < 8:
-            t = time.time() - t0
-            magnitude(dev, ep, block, 255 * math.sin(2 * math.pi * t / 2.5))
-            time.sleep(0.06)
-        magnitude(dev, ep, block, 0);  time.sleep(0.4)
+            angle = ((time.time() - t0) / 5.0) * 360.0   # full circle in 5s
+            direction_byte = int(angle / 360.0 * 256) % 256
+            # Update direction in-flight (no stop/restart — smoother)
+            out(dev, ep, [
+                R_SET_EFFECT, block, 0x01, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x00,
+                0xff, 0x00, 0x07, direction_byte, 0x00, 0x00, 0x00,
+            ])
+            time.sleep(0.04)
+        stop_effect(dev, ep, block);  time.sleep(0.4)
 
-        # ── Pattern 3: Ramp → full tension → snap release ────────────────
-        print("Tension and snap")
-        for i in range(30):
-            magnitude(dev, ep, block, i * 8)   # ramp 0 → 232 over 1.5 s
-            time.sleep(0.05)
-        magnitude(dev, ep, block, 255);  time.sleep(0.8)   # hold full tension
-        magnitude(dev, ep, block,   0);  time.sleep(0.05)  # snap release
-        magnitude(dev, ep, block, -255); time.sleep(0.3)   # rebound
-        magnitude(dev, ep, block,   0);  time.sleep(0.5)
+        # ── Spring positioning ───────────────────────────────────────────
+        # Without mechanical spring, this actively moves the stick to the target
+        print("Spring: center")
+        spring(dev, ep, block, x_center=0, y_center=0)
+        time.sleep(2.0)
 
-        # ── Pattern 4: Heartbeat — big thumps ────────────────────────────
-        print("Heartbeat")
-        for _ in range(5):
-            magnitude(dev, ep, block,  255);  time.sleep(0.12)
-            magnitude(dev, ep, block,    0);  time.sleep(0.10)
-            magnitude(dev, ep, block,  180);  time.sleep(0.12)
-            magnitude(dev, ep, block,    0);  time.sleep(0.55)
+        print("Spring: top-right corner")
+        spring(dev, ep, block, x_center=100, y_center=-100)
+        time.sleep(2.0)
 
-        # ── Pattern 5: Alternating slams, accelerating ───────────────────
+        print("Spring: bottom-left corner")
+        spring(dev, ep, block, x_center=-100, y_center=100)
+        time.sleep(2.0)
+
+        print("Spring: back to center")
+        spring(dev, ep, block, x_center=0, y_center=0)
+        time.sleep(2.0)
+
+        # ── Accelerating left/right slams ────────────────────────────────
         print("Accelerating slams")
-        delay = 0.5
-        for _ in range(16):
-            magnitude(dev, ep, block,  255);  time.sleep(delay)
-            magnitude(dev, ep, block, -255);  time.sleep(delay)
-            delay *= 0.82   # speed up each cycle
+        delay = 0.55
+        for _ in range(18):
+            push(dev, ep, block, 90)
+            time.sleep(delay)
+            push(dev, ep, block, 270)
+            time.sleep(delay)
+            delay *= 0.82
 
-        # ── Done ─────────────────────────────────────────────────────────
-        magnitude(dev, ep, block, 0)
-        out(dev, ep, [R_EFFECT_OPERATION, block, 0x03, 0x00])
+        stop_effect(dev, ep, block)
         print("Done!")
 
     finally:
