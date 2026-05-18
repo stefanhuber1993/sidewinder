@@ -3,9 +3,8 @@
 Read and parse the HID report descriptor from the Sidewinder FF2.
 Run with: sudo venv/bin/python3 discover.py
 
-This tells us which report IDs map to which HID PID functions
-(Device Control, Set Effect, Constant Force, Effect Operation, etc.)
-so we can construct the right packets in demo.py.
+Prints report IDs, field names, bit sizes, and logical ranges so we can
+construct correctly-encoded packets in demo.py.
 """
 import usb.core
 import usb.util
@@ -14,7 +13,6 @@ VID = 0x045e
 PID = 0x001b
 INTERFACE = 0
 
-# HID usage page / usage names for force feedback
 FF_USAGES = {
     (0x0F, 0x21): "Set Effect Report",
     (0x0F, 0x5A): "Set Envelope Report",
@@ -30,17 +28,99 @@ FF_USAGES = {
     (0x0F, 0x7F): "Block Free Report",
 }
 
-def parse_descriptor(raw):
+USAGE_NAMES = {
+    # Generic Desktop
+    (0x01, 0x30): "X",
+    (0x01, 0x31): "Y",
+    # PID
+    (0x0F, 0x21): "Set Effect",
+    (0x0F, 0x22): "Effect Block Index",
+    (0x0F, 0x25): "Duration",
+    (0x0F, 0x26): "Sample Period",
+    (0x0F, 0x27): "Gain",
+    (0x0F, 0x28): "Trigger Button",
+    (0x0F, 0x29): "Trigger Repeat Interval",
+    (0x0F, 0x2A): "Axes Enable",
+    (0x0F, 0x2B): "Direction Enable",
+    (0x0F, 0x2C): "Direction",
+    (0x0F, 0x2D): "Type Specific Block Offset",
+    (0x0F, 0x2E): "Block Type",
+    (0x0F, 0x2F): "Set Envelope",
+    (0x0F, 0x30): "Attack Level",
+    (0x0F, 0x31): "Attack Time",
+    (0x0F, 0x32): "Fade Level",
+    (0x0F, 0x33): "Fade Time",
+    (0x0F, 0x40): "Magnitude",
+    (0x0F, 0x41): "Phase",
+    (0x0F, 0x42): "Period",
+    (0x0F, 0x50): "CP Offset",
+    (0x0F, 0x51): "Positive Coefficient",
+    (0x0F, 0x52): "Negative Coefficient",
+    (0x0F, 0x53): "Positive Saturation",
+    (0x0F, 0x54): "Negative Saturation",
+    (0x0F, 0x55): "Dead Band",
+    (0x0F, 0x57): "Set Condition",
+    (0x0F, 0x58): "Type Specific Block Handle",
+    (0x0F, 0x70): "Set Periodic",
+    (0x0F, 0x73): "Set Constant Force",
+    (0x0F, 0x77): "Effect Operation",
+    (0x0F, 0x78): "Op Effect Start",
+    (0x0F, 0x79): "Op Effect Start Solo",
+    (0x0F, 0x7A): "Op Effect Stop",
+    (0x0F, 0x7B): "Loop Count",
+    (0x0F, 0x7E): "Device Gain",
+    (0x0F, 0x7F): "Device Gain Report",
+    (0x0F, 0x89): "Block Load Report",
+    (0x0F, 0x8B): "Block Load Status",
+    (0x0F, 0x8C): "Block Load Full",
+    (0x0F, 0x8D): "Block Load Error",
+    (0x0F, 0x8E): "Block Handle",
+    (0x0F, 0x8F): "Block Free Report",
+    (0x0F, 0x90): "Type Specific Block Handle",
+    (0x0F, 0x95): "Device Control",
+    (0x0F, 0x96): "Device Control Report",
+    (0x0F, 0x97): "DC Enable Actuators",
+    (0x0F, 0x98): "DC Disable Actuators",
+    (0x0F, 0x99): "DC Stop All Effects",
+    (0x0F, 0x9A): "DC Device Reset",
+    (0x0F, 0x9B): "DC Device Pause",
+    (0x0F, 0x9C): "DC Device Continue",
+    (0x0F, 0xA7): "Actuator Power",
+    (0x0F, 0xAB): "Create New Effect",
+    (0x0F, 0xAC): "RAM Pool Available",
+    (0x0F, 0xC0): "CP Offset",
+    (0x0F, 0xC1): "Positive Coefficient",
+    (0x0F, 0xC2): "Negative Coefficient",
+    (0x0F, 0xC3): "Positive Saturation",
+    (0x0F, 0xC4): "Negative Saturation",
+    (0x0F, 0xC5): "Dead Band",
+}
+
+
+def parse_descriptor_fields(raw):
     """
-    Minimal HID descriptor parser — extracts report IDs and their
-    associated usage page / usage so we can identify FF report types.
+    Full HID descriptor parser that tracks logical min/max, report size/count,
+    and emits one entry per field with its bit width and logical range.
     """
     i = 0
-    current_usage_page = 0
-    current_usage = 0
-    current_report_id = None
-    report_type = None  # 'input', 'output', 'feature'
-    results = []
+    # Global state
+    usage_page = 0
+    logical_min = 0
+    logical_max = 0
+    report_size = 0   # bits per field
+    report_count = 0  # number of fields
+    report_id = None
+    # Local state
+    usages = []
+    usage_min = None
+    usage_max = None
+
+    results = []  # list of dicts
+
+    def sign_extend(val, bits):
+        if val >= (1 << (bits - 1)):
+            val -= (1 << bits)
+        return val
 
     while i < len(raw):
         b = raw[i]
@@ -49,33 +129,55 @@ def parse_descriptor(raw):
         tag  = (b >> 4) & 0x0F
 
         if size == 0:
-            val = 0
-            i += 1
+            val = 0; i += 1
         elif size == 1:
-            val = raw[i + 1]
-            i += 2
+            val = raw[i + 1]; i += 2
         elif size == 2:
-            val = raw[i + 1] | (raw[i + 2] << 8)
-            i += 3
+            val = raw[i + 1] | (raw[i + 2] << 8); i += 3
         else:
-            val = int.from_bytes(raw[i+1:i+5], 'little')
-            i += 5
+            val = int.from_bytes(raw[i+1:i+5], 'little'); i += 5
 
-        # Global: Usage Page
-        if typ == 1 and tag == 0:
-            current_usage_page = val
-        # Local: Usage
-        elif typ == 2 and tag == 0:
-            current_usage = val
-        # Global: Report ID
-        elif typ == 1 and tag == 8:
-            current_report_id = val
-        # Main: Input / Output / Feature
-        elif typ == 0 and tag in (8, 9, 11):
-            kind = {8: 'INPUT', 9: 'OUTPUT', 11: 'FEATURE'}[tag]
-            key = (current_usage_page, current_usage)
-            label = FF_USAGES.get(key, f"usagePage=0x{current_usage_page:02X} usage=0x{current_usage:02X}")
-            results.append((current_report_id, kind, label))
+        # --- Global items ---
+        if typ == 1:
+            if tag == 0:   usage_page   = val
+            elif tag == 1: logical_min  = sign_extend(val, size * 8) if size else 0
+            elif tag == 2: logical_max  = sign_extend(val, size * 8) if size else 0
+            elif tag == 7: report_size  = val
+            elif tag == 8: report_id    = val
+            elif tag == 9: report_count = val
+
+        # --- Local items ---
+        elif typ == 2:
+            if tag == 0:   usages.append((usage_page, val))
+            elif tag == 1: usage_min = (usage_page, val)
+            elif tag == 2: usage_max = (usage_page, val)
+
+        # --- Main items ---
+        elif typ == 0:
+            if tag in (8, 9, 11):  # Input / Output / Feature
+                kind = {8: 'INPUT', 9: 'OUTPUT', 11: 'FEATURE'}[tag]
+
+                # Expand usage min/max range if set
+                if usage_min is not None and usage_max is not None:
+                    for u in range(usage_min[1], usage_max[1] + 1):
+                        usages.append((usage_min[0], u))
+                    usage_min = usage_max = None
+
+                for idx in range(report_count):
+                    u = usages[idx] if idx < len(usages) else (usage_page, 0)
+                    name = USAGE_NAMES.get(u, f"0x{u[0]:02X}/0x{u[1]:02X}")
+                    results.append({
+                        'report_id': report_id,
+                        'kind': kind,
+                        'usage': u,
+                        'name': name,
+                        'bits': report_size,
+                        'logical_min': logical_min,
+                        'logical_max': logical_max,
+                    })
+
+                # Reset local state
+                usages = []
 
     return results
 
@@ -96,23 +198,31 @@ def main():
 
         dev.set_configuration()
 
-        # Fetch HID report descriptor via GET_DESCRIPTOR control transfer
-        # bmRequestType=0x81 (IN, Standard, Interface), bRequest=0x06 (GET_DESCRIPTOR)
-        # wValue=0x2200 (HID Report Descriptor, type 0x22), wIndex=interface
-        raw = dev.ctrl_transfer(0x81, 0x06, 0x2200, INTERFACE, 512)
-
+        raw = dev.ctrl_transfer(0x81, 0x06, 0x2200, INTERFACE, 4096)
         print(f"\nRaw descriptor ({len(raw)} bytes):")
         print(" ".join(f"{b:02x}" for b in raw))
 
-        print("\nParsed reports:")
-        print(f"  {'ID':>4}  {'TYPE':8}  FUNCTION")
-        print(f"  {'--':>4}  {'----':8}  --------")
-        seen = set()
-        for report_id, kind, label in parse_descriptor(raw):
-            key = (report_id, kind)
-            if key not in seen:
-                seen.add(key)
-                print(f"  {report_id:>4}  {kind:8}  {label}")
+        fields = parse_descriptor_fields(raw)
+
+        # Group by report_id + kind
+        from collections import defaultdict
+        by_report = defaultdict(list)
+        for f in fields:
+            by_report[(f['report_id'], f['kind'])].append(f)
+
+        print("\n\nDetailed field layout per report:")
+        for (rid, kind), flist in sorted(by_report.items()):
+            byte_offset = 1  # after report ID byte
+            bit_offset = 0
+            print(f"\n  Report ID {rid}  [{kind}]")
+            print(f"    {'byte':>5}  {'bits':>4}  {'logical range':>20}  field")
+            for f in flist:
+                bstr = f"[{byte_offset}.{bit_offset}]" if bit_offset else f"[{byte_offset}]"
+                rng = f"{f['logical_min']}..{f['logical_max']}"
+                print(f"    {bstr:>5}  {f['bits']:>4}  {rng:>20}  {f['name']}")
+                bit_offset += f['bits']
+                byte_offset += bit_offset // 8
+                bit_offset %= 8
 
     finally:
         if reattach:
