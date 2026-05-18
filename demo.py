@@ -28,11 +28,12 @@ def out(dev, ep, data):
 
 
 def magnitude(dev, ep, block, val):
-    """Send constant force magnitude. val: -255 to +255."""
+    """Send constant force magnitude and restart effect so device picks it up. val: -255 to +255."""
     val = max(-255, min(255, int(val)))
-    if val < 0:
-        val += 65536                      # two's complement uint16
-    out(dev, ep, [R_SET_CONSTANT_FORCE, block, val & 0xFF, (val >> 8) & 0xFF])
+    raw = val if val >= 0 else val + 65536   # two's complement uint16
+    out(dev, ep, [R_EFFECT_OPERATION, block, 0x03, 0x00])   # stop
+    out(dev, ep, [R_SET_CONSTANT_FORCE, block, raw & 0xFF, (raw >> 8) & 0xFF])
+    out(dev, ep, [R_EFFECT_OPERATION, block, 0x01, 0x01])   # restart
 
 
 def set_effect(dev, ep, block, axes=0x01, dir0=0x00, dir1=0x00):
@@ -74,56 +75,51 @@ def main():
         out(dev, ep, [R_EFFECT_OPERATION, block, 0x01, 0x01])  # Start
         time.sleep(0.1)
 
-        # ── Pattern 1: Heartbeat ──────────────────────────────────────────
-        print("Heartbeat")
+        # ── Pattern 1: Slam left, hold, slam right, hold ─────────────────
+        print("Left / right slams")
         for _ in range(4):
-            magnitude(dev, ep, block,  220);  time.sleep(0.08)
-            magnitude(dev, ep, block,    0);  time.sleep(0.07)
-            magnitude(dev, ep, block,  140);  time.sleep(0.08)
-            magnitude(dev, ep, block,    0);  time.sleep(0.50)
-
-        # ── Pattern 2: Sine sweep left ↔ right ───────────────────────────
-        print("Sine sweep")
-        t0 = time.time()
-        while time.time() - t0 < 5:
-            t = time.time() - t0
-            magnitude(dev, ep, block, 230 * math.sin(2 * math.pi * t / 1.4))
-            time.sleep(0.025)
-        magnitude(dev, ep, block, 0);  time.sleep(0.3)
-
-        # ── Pattern 3: Ramp → snap ────────────────────────────────────────
-        print("Ramp and snap")
-        for i in range(60):
-            magnitude(dev, ep, block, i * 4)
-            time.sleep(0.03)
-        magnitude(dev, ep, block, 0);   time.sleep(0.05)
-        magnitude(dev, ep, block, -240);  time.sleep(0.10)   # snap back
-        magnitude(dev, ep, block, 0);   time.sleep(0.4)
-
-        # ── Pattern 4: Machine-gun pulses ─────────────────────────────────
-        print("Rapid pulses")
-        for i in range(24):
-            magnitude(dev, ep, block, 240);  time.sleep(0.035)
-            magnitude(dev, ep, block,   0);  time.sleep(0.035)
-
+            magnitude(dev, ep, block,  255);  time.sleep(0.8)
+            magnitude(dev, ep, block, -255);  time.sleep(0.8)
         magnitude(dev, ep, block, 0);  time.sleep(0.4)
 
-        # ── Pattern 5: Circular (X+Y axes, rotating direction) ───────────
-        # Experimental — behaviour depends on how device interprets direction bytes.
-        # Direction byte 0 = angle on axis 1 (0–255 maps to 0–360°)
-        # Direction byte 1 = angle on axis 2
-        print("Circular (experimental)")
-        magnitude(dev, ep, block, 220)
+        # ── Pattern 2: Slow sine sweep — full travel ─────────────────────
+        print("Slow sine sweep")
         t0 = time.time()
-        while time.time() - t0 < 4:
+        while time.time() - t0 < 8:
             t = time.time() - t0
-            angle = int(255 * (t % 3) / 3)    # full rotation every 3 s
-            set_effect(dev, ep, block, axes=0x07, dir0=angle, dir1=(angle + 64) % 256)
-            time.sleep(0.04)
+            magnitude(dev, ep, block, 255 * math.sin(2 * math.pi * t / 2.5))
+            time.sleep(0.06)
+        magnitude(dev, ep, block, 0);  time.sleep(0.4)
+
+        # ── Pattern 3: Ramp → full tension → snap release ────────────────
+        print("Tension and snap")
+        for i in range(30):
+            magnitude(dev, ep, block, i * 8)   # ramp 0 → 232 over 1.5 s
+            time.sleep(0.05)
+        magnitude(dev, ep, block, 255);  time.sleep(0.8)   # hold full tension
+        magnitude(dev, ep, block,   0);  time.sleep(0.05)  # snap release
+        magnitude(dev, ep, block, -255); time.sleep(0.3)   # rebound
+        magnitude(dev, ep, block,   0);  time.sleep(0.5)
+
+        # ── Pattern 4: Heartbeat — big thumps ────────────────────────────
+        print("Heartbeat")
+        for _ in range(5):
+            magnitude(dev, ep, block,  255);  time.sleep(0.12)
+            magnitude(dev, ep, block,    0);  time.sleep(0.10)
+            magnitude(dev, ep, block,  180);  time.sleep(0.12)
+            magnitude(dev, ep, block,    0);  time.sleep(0.55)
+
+        # ── Pattern 5: Alternating slams, accelerating ───────────────────
+        print("Accelerating slams")
+        delay = 0.5
+        for _ in range(16):
+            magnitude(dev, ep, block,  255);  time.sleep(delay)
+            magnitude(dev, ep, block, -255);  time.sleep(delay)
+            delay *= 0.82   # speed up each cycle
 
         # ── Done ─────────────────────────────────────────────────────────
         magnitude(dev, ep, block, 0)
-        out(dev, ep, [R_EFFECT_OPERATION, block, 0x03, 0x00])  # Stop
+        out(dev, ep, [R_EFFECT_OPERATION, block, 0x03, 0x00])
         print("Done!")
 
     finally:
