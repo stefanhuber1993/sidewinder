@@ -1,0 +1,2 @@
+sudo venv/bin/jupyter lab notebook.ipynb --no-browser --allow-root
+sudo venv/bin/jupyter lab notebook.ipynb --no-browser --allow-root

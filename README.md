@@ -13,70 +13,57 @@ Python tooling to drive force feedback on the **Microsoft SideWinder Force Feedb
 
 ---
 
-## Current State — PyUSB demo
+## Current State
 
-The current code uses **PyUSB + libusb** to claim the device directly and send raw **HID PID output reports**, bypassing macOS's HID kernel driver.
+The driver (`sidewinder/ff2.py`) uses **python-hid (hidapi)** to send HID PID output reports via macOS's native **IOKit HID Manager**. This means:
 
-This is good for:
-- Exploring which HID PID reports the device responds to
-- Quickly iterating on force values and effect types without a compile step
-- Proving communication works before committing to a heavier architecture
+- **No `sudo` required** — IOKit HID Manager is user-space accessible
+- **No exclusive access** — the OS joystick driver keeps reading axes and buttons normally
+- Force feedback output reports are sent in parallel with normal joystick input
 
-Limitation: `libusb` requires **exclusive USB access** — while the demo runs, macOS loses joystick axis/button input. Fine for a standalone test, not suitable for running alongside a simulator.
+### Why sudo is NOT needed (the fix)
+
+The old approach used `pyusb` + `libusb`, which works by calling `IOUSBDevice::USBDeviceOpen` to claim **exclusive** USB access and then detach the IOHIDFamily kernel driver. Detaching kernel drivers requires root, hence `sudo`.
+
+The fix: use **hidapi** via the `hid` Python package. On macOS, hidapi talks to the device through the **IOKit HID Manager API** (`IOHIDManager`, `IOHIDDevice`), which is designed for user-space HID access. It does not detach the kernel driver — it shares the device with it. Force feedback output reports go through the HID driver directly to the device; HID input (axes, buttons) continues to flow normally to the OS.
+
+This is also the correct architecture for the eventual X-Plane bridge: the joystick stays fully functional in-game while the bridge sends FF output reports alongside.
 
 ### Setup
 
 ```bash
-brew install libusb      # if not already installed
-./setup.sh               # creates venv, installs pyusb
+brew install hidapi      # native hidapi library (IOKit backend)
+./setup.sh               # creates venv, installs Python deps
 source venv/bin/activate
-sudo venv/bin/python3 demo.py
+python3 notebook.ipynb   # or: jupyter notebook
 ```
 
-`sudo` is required so libusb can detach the macOS HID kernel driver.
-
-### Architecture
-
-```
-demo.py          orchestrates the demo sequence
-sidewinder/
-  device.py      USB open/close, kernel driver detach/reattach
-  hidpid.py      HID PID report construction and send
-  effects.py     named effect builders (constant, sine, spring)
-tests/           unit tests for report construction and effect builders
-```
+No `sudo` needed at any step.
 
 ---
 
 ## Protocol: USB HID PID
 
-The SideWinder FF2 implements the [USB HID PID specification](https://www.usb.org/sites/default/files/pid1_01.pdf). Effects are defined and controlled via structured **HID output reports**, whose IDs are declared in the device's HID report descriptor.
+The SideWinder FF2 implements the [USB HID PID specification](https://www.usb.org/sites/default/files/pid1_01.pdf). Effects are defined and controlled via structured **HID output reports** and **HID feature reports**:
 
-Key report types (IDs discovered at runtime from the descriptor):
-- **Set Effect** — define effect type, duration, direction
-- **Set Constant Force** — magnitude for constant push/pull
-- **Set Periodic** — magnitude, period, phase for sine/square/triangle
-- **Set Condition** — coefficients for spring/damper
-- **Set Envelope** — attack/fade shaping for any effect
-- **Effect Operation** — play, stop, solo
-- **Device Control** — enable FF, reset, disable
-- **Device Gain** — overall FF strength
+| Report | ID | Direction | Purpose |
+|---|---|---|---|
+| Set Effect | 0x01 | OUT | Define effect type, duration, direction |
+| Set Envelope | 0x02 | OUT | Attack/fade shaping |
+| Set Condition | 0x03 | OUT | Spring/damper coefficients per axis |
+| Set Periodic | 0x04 | OUT | Magnitude, period, phase |
+| Set Constant Force | 0x05 | OUT | Magnitude for constant push |
+| Effect Operation | 0x0a | OUT | Play / stop / solo |
+| Device Control | 0x0c | OUT | Enable FF, reset, disable |
+| Device Gain | 0x0d | OUT | Overall FF strength |
+| Create New Effect | 0x01 | FEATURE SET | Allocate effect block |
+| PID Block Load | 0x02 | FEATURE GET | Returns allocated block index |
 
 ---
 
 ## Long-term plan — X-Plane bridge
 
-The goal is a background process that reads X-Plane flight data and translates it into live force feedback on the joystick, similar to what [ffb-bridge](https://ffb-bridge.com/) does on Windows/Linux.
-
-### Why pyusb won't work for the bridge
-
-`libusb` steals the device from the OS entirely. If it's claimed by the bridge, X-Plane cannot read joystick axes or buttons. Not viable for a co-running process.
-
-### The right transport: IOHIDDevice output reports
-
-macOS's **IOHIDDevice API** (part of IOKit) allows sending HID output reports without claiming exclusive USB access. The HID kernel driver keeps the device open for input (X-Plane reads axes normally), and the bridge sends FF output reports in parallel through the same driver.
-
-Python reaches IOHIDDevice via `ctypes` calling into the IOKit framework.
+The goal is a background process that reads X-Plane flight data and translates it into live force feedback on the joystick.
 
 ### Bridge architecture (planned)
 
@@ -90,19 +77,11 @@ X-Plane (UDP telemetry)
   bridge/forces.py      maps flight model → force effect parameters
         │ effect type + magnitude
         ▼
-  bridge/iohid.py       sends HID PID output reports via IOHIDDevice
-        │ (non-exclusive — X-Plane input still works)
+  sidewinder/ff2.py     sends HID PID reports via IOKit HID Manager
+        │ (non-exclusive — X-Plane joystick input still works)
         ▼
   Sidewinder FF2
 ```
-
-`effects.py` stays identical — only the transport layer (`hidpid.py` → `iohid.py`) changes when migrating from pyusb to IOHIDDevice.
-
-### Migration path
-
-1. **Now:** pyusb demo — prove HID PID packets work, explore effect parameters
-2. **Next:** port transport to IOHIDDevice (ctypes) so bridge and X-Plane coexist
-3. **Then:** add X-Plane UDP reader and force mapping
 
 ### X-Plane data sources
 
@@ -120,7 +99,8 @@ X-Plane exposes flight model data over UDP via the RREF (dataref request) protoc
 
 ## Known issues / gotchas
 
-- **macOS HID driver detach**: `libusb` calls `IOUSBDevice::USBDeviceOpen` exclusively. Always runs in a `try/finally` to guarantee reattach on crash.
-- **HID PID report IDs are device-specific**: They are declared in the HID report descriptor, not fixed by the spec. The demo reads the descriptor first to discover them rather than hardcoding.
+- **HID PID report IDs are device-specific**: They are declared in the HID report descriptor, not fixed by the spec. Verify with `discover.py` if in doubt.
 - **Sidewinder FF2 has known bugs in Linux's hid-pidff**: The initialisation sequence and effect-ID tracking had bugs (fixed in recent kernels). May need equivalent workarounds when talking to the device directly.
-- **No macOS game support**: macOS's `ForceFeedback.framework` is deprecated and SDL2 never properly implemented it, so no existing game drives FF on macOS. The bridge approach bypasses this entirely by computing forces from telemetry rather than relying on the game to output them.
+- **No macOS game support**: macOS's `ForceFeedback.framework` is deprecated and SDL2 never properly implemented it for this device. The bridge bypasses this entirely by computing forces from telemetry.
+- **hidapi `write()` report format**: the first byte passed to `hid.write()` must be the HID output report ID. The FF2 uses numbered reports (0x01–0x0d), so no zero-prefix is needed.
+- **Multiple HID collections**: if `hid.enumerate()` returns multiple entries for the same VID/PID, the driver picks `devs[0]`. Use `hid.enumerate(0x045e, 0x001b)` to inspect all entries and adjust the index if needed.

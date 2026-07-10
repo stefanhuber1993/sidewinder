@@ -1,1 +1,4 @@
-pyusb
+hid
+numpy
+matplotlib
+ipywidgets
