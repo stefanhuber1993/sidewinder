@@ -2,7 +2,13 @@
 """
 Sidewinder FF2 + pygame — a small flight demo with force feedback.
 
-Run:  pip install pygame  &&  venv/bin/python3 examples/pygame_demo.py
+pygame is not in requirements.txt (the library does not need it, only this
+example does), so install it first::
+
+    venv/bin/pip install pygame
+    venv/bin/python3 examples/pygame_demo.py
+
+Controls::
 
     stick        steer the ship
     thrust lever throttle (drives engine rumble)
@@ -19,11 +25,17 @@ would from pygame.event.get(). Both are non-blocking, so neither stalls the loop
 The FF2's grip sensor gates all force output — hold the stick or you will feel
 nothing.
 """
-import math
 import sys
 import os
 
-import pygame
+try:
+    import pygame
+except ImportError:
+    sys.exit(
+        "This demo needs pygame, which the library itself does not.\n"
+        "Install it with:\n\n"
+        "    venv/bin/pip install pygame\n"
+    )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

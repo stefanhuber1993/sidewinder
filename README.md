@@ -53,6 +53,14 @@ python3 monitor.py       # live view of every control
 jupyter lab notebook.ipynb   # interactive effect lab with live sliders
 ```
 
+The pygame demo needs one extra package, deliberately left out of
+`requirements.txt` because only the example uses it:
+
+```bash
+pip install pygame                      # optional
+python3 examples/pygame_demo.py         # fly a ship with force feedback
+```
+
 ---
 
 ## Sending force effects
@@ -304,19 +312,35 @@ while running:
     clock.tick(60)
 ```
 
-`examples/pygame_demo.py` is a complete, runnable version: fly a ship with the
-stick, throttle with the lever, fire on button 1 (which kicks the stick), hold
-button 2 for an airbrake damper, and trim with the hat.
-
-```bash
-pip install pygame
-venv/bin/python3 examples/pygame_demo.py
-```
-
 > **Don't reach for `pygame.joystick` for this device.** On macOS, SDL doesn't
 > enumerate the FF2 here at all (`get_count()` returns 0) and has no force
 > feedback for it either way. Read input through this library and you get the
 > controls and the forces from one handle.
+
+### Running the pygame demo
+
+`examples/pygame_demo.py` is a complete, playable version of the above. pygame
+is **not** installed by `setup.sh` — the library itself doesn't need it, only
+this example does, so install it separately:
+
+```bash
+venv/bin/pip install pygame            # optional — only for this demo
+venv/bin/python3 examples/pygame_demo.py
+```
+
+Or, with the venv activated (`source venv/bin/activate`), plain
+`pip install pygame` and `python3 examples/pygame_demo.py` do the same.
+
+| Control | Does |
+|---|---|
+| stick | steer the ship |
+| thrust lever | throttle — also drives the engine rumble |
+| button 1 | fire, and kick the stick backwards |
+| button 2 | hold for an airbrake (heavy damper) |
+| hat | trim; the centring spring re-centres around the trim point |
+| `ESC` / close | quit |
+
+Hold the grip — the hand sensor gates every effect in the demo.
 
 ### Stick position only
 
