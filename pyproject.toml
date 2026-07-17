@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sidewinder"
+version = "0.1.0"
+description = "Microsoft SideWinder Force Feedback 2 driver -- full HID PID protocol over hidapi, no sudo required."
+readme = "README.md"
+requires-python = ">=3.9"
+# The library itself needs only `hid` (plus the native hidapi library, which pip
+# cannot install -- see the README). requirements.txt additionally covers the
+# notebooks, demos and tests; those live in the extras below so that depending on
+# `sidewinder` as a library does not drag in matplotlib and ipywidgets.
+dependencies = [
+    "hid",
+]
+
+[project.optional-dependencies]
+notebooks = ["numpy", "matplotlib", "ipywidgets"]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/stefanhuber1993/sidewinder"
+
+# Ship only the package. demo.py, discover.py and monitor.py are top-level
+# scripts meant to be run from a clone, not importable modules to install.
+[tool.setuptools.packages.find]
+include = ["sidewinder*"]
