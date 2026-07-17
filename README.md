@@ -35,17 +35,17 @@ your code  →  sidewinder/ff2.py  →  hid (hidapi)  →  OS HID stack  →  FF
 ```
 
 The driver talks to the device through **hidapi**, which wraps whatever HID API
-the OS provides. It *shares* the device with the OS driver rather than claiming
-it, so:
+the OS provides, so:
 
-- **No exclusive access.** The OS joystick driver keeps reading axes and buttons
-  normally; force output reports flow alongside its input.
 - **No sudo** on macOS or Windows — these HID APIs are built for user-space
-  access. Linux needs a one-line udev rule, because `/dev/hidraw*` is root-only
-  by default.
+  access, and hidapi never detaches or replaces the kernel HID driver. Linux
+  needs a one-line udev rule, because `/dev/hidraw*` is root-only by default.
+- **One program at a time.** hidapi opens the device exclusively on macOS, so a
+  second process gets `exclusive access and device already open`. Close
+  `monitor.py` before starting a game, and vice versa.
 
-(A `pyusb`/`libusb` approach would instead claim the device exclusively and
-detach the kernel HID driver — which is what requires root.)
+(A `pyusb`/`libusb` approach would instead detach the kernel HID driver to claim
+the device — which is what requires root.)
 
 ## Setup
 
@@ -531,6 +531,12 @@ Input report 1 is 13 bytes and packs the controls at bit-level offsets:
 - **No force unless you hold the grip.** The hand sensor gates all motor output.
   Everything else — allocation, `effect_playing`, position reads — behaves
   normally while producing zero force, which makes this look like a driver bug.
+- **Only one program can open the joystick.** hidapi opens exclusively on macOS
+  by default, so a second process fails with `hid_open_path: ... exclusive access
+  and device already open`. If `monitor.py`, a notebook or a game has it, nothing
+  else can — quit the other one. (libhidapi does expose
+  `hid_darwin_set_open_exclusive` to relax this, but the `hid` Python package
+  doesn't surface it.)
 - **Direction angles are not the compass convention.** `0°` is back and `90°` is
   left, measured on the device. Don't assume; read the position back.
 - **Forward on the stick is negative `y`.** Push away from you and `y` goes to

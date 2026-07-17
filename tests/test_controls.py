@@ -40,10 +40,31 @@ def test_centered_stick_decodes_to_zero():
     assert s.twist == 0.0
 
 
-def test_axes_decode_10_bit_signed_extremes():
-    assert decode_input_report(packet(x=511)).x == pytest.approx(511 / 512)
-    assert decode_input_report(packet(x=512)).x == -1.0   # -512 wraps negative
-    assert decode_input_report(packet(y=512)).y == -1.0
+def test_axes_reach_exactly_one_at_both_stops():
+    # The logical range is asymmetric (-512..511). Both stops must still read
+    # exactly +-1.0: dividing both sides by 512 would top out at +0.998.
+    assert decode_input_report(packet(x=511)).x == 1.0    # full right
+    assert decode_input_report(packet(x=512)).x == -1.0   # raw -512, full left
+    assert decode_input_report(packet(y=511)).y == 1.0    # full back
+    assert decode_input_report(packet(y=512)).y == -1.0   # full forward
+
+
+def test_twist_reaches_exactly_one_at_both_stops():
+    assert decode_input_report(packet(twist=31)).twist == 1.0    # raw 31
+    assert decode_input_report(packet(twist=32)).twist == -1.0   # raw -32
+
+
+def test_axes_stay_centered_at_zero():
+    # Scaling each side separately must not shift the centre off zero.
+    s = decode_input_report(packet(x=0, y=0, twist=0))
+    assert (s.x, s.y, s.twist) == (0.0, 0.0, 0.0)
+
+
+def test_axes_are_monotonic_across_the_full_range():
+    xs = [decode_input_report(packet(x=raw & 0x3FF)).x
+          for raw in list(range(-512, 512))]
+    assert xs == sorted(xs)
+    assert min(xs) == -1.0 and max(xs) == 1.0
 
 
 def test_real_baseline_packet_from_hardware():
@@ -57,14 +78,14 @@ def test_real_baseline_packet_from_hardware():
 
 
 def test_twist_decodes_6_bit_signed():
-    assert decode_input_report(packet(twist=31)).twist == pytest.approx(31 / 32)
-    assert decode_input_report(packet(twist=32)).twist == -1.0   # -32
+    # Raw 63 is -1 in 6-bit two's complement, not a large positive number.
     assert decode_input_report(packet(twist=63)).twist == pytest.approx(-1 / 32)
+    assert decode_input_report(packet(twist=16)).twist == pytest.approx(16 / 31)
 
 
 def test_twist_ignores_the_two_padding_bits():
     # Bits 6-7 of the byte are padding and must not leak into the value.
-    assert decode_input_report(packet(twist=0xC0 | 10)).twist == pytest.approx(10 / 32)
+    assert decode_input_report(packet(twist=0xC0 | 10)).twist == pytest.approx(10 / 31)
 
 
 # ── Thrust lever ──────────────────────────────────────────────────────────────

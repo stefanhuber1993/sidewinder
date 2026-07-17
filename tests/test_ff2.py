@@ -303,10 +303,11 @@ def input_packet(x=0, y=0):
 
 def test_read_position_decodes_10_bit_signed_axes(dev):
     # Captured at rest: x = 227 | (3 << 8) = 995 -> 995-1024 = -29 ; y = 6
+    # Negative side scales by 512, positive side by 511 (see _normalize).
     dev.fake.reads = [[1, 227, 255, 6, 0, 0, 0, 8, 0, 0, 0, 0, 0]]
     x, y = dev.read_position()
     assert x == pytest.approx(-29 / 512.0)
-    assert y == pytest.approx(6 / 512.0)
+    assert y == pytest.approx(6 / 511.0)
 
 
 def test_read_position_centers_at_zero(dev):
@@ -328,7 +329,7 @@ def test_read_position_returns_newest_not_oldest_queued_report(dev):
         input_packet(x=511),   # newest: full right
     ]
     x, _ = dev.read_position()
-    assert x == pytest.approx(511 / 512.0)
+    assert x == 1.0
     assert dev.fake.reads == []  # queue fully drained
 
 
@@ -444,7 +445,7 @@ def test_read_input_decodes_every_control(dev):
     # twist=+31, thrust raw 0 = full forward, hat=right(2), buttons 1 and 8
     dev.fake.reads = [[1, 0, 0, 0, 0, 31, 0, 2, 0b10000001, 0, 0, 0, 0]]
     s = dev.read_input()
-    assert s.twist == pytest.approx(31 / 32)
+    assert s.twist == 1.0
     assert s.throttle == 1.0
     assert s.hat == (1, 0)
     assert s.pressed == (1, 8)
@@ -457,7 +458,7 @@ def test_read_input_returns_none_before_any_report(dev):
 
 def test_read_position_still_returns_just_the_axes(dev):
     dev.fake.reads = [[1, 255, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0]]
-    assert dev.read_position() == (pytest.approx(511 / 512), 0.0)
+    assert dev.read_position() == (1.0, 0.0)
 
 
 def test_get_events_baselines_on_first_call(dev):

@@ -328,7 +328,17 @@ class FF2Device:
         # which holds both axis input and HID PID force-feedback output reports.
         joystick = [d for d in devs if d.get('usage_page') == 1 and d.get('usage') == 4]
         target = joystick[0] if joystick else devs[0]
-        self._h = hid.Device(path=target['path'])
+        try:
+            self._h = hid.Device(path=target['path'])
+        except Exception as exc:
+            # hidapi opens exclusively on macOS, so a second client is refused.
+            if "already open" in str(exc) or "exclusive" in str(exc):
+                raise RuntimeError(
+                    "Sidewinder FF2 is already open in another program.\n"
+                    "Only one process can hold the joystick — quit the other one "
+                    "(monitor.py, a notebook kernel, a game) and retry."
+                ) from exc
+            raise
         # Keep in default (nonblocking) mode; read() with timeout_ms handles blocking.
         # Newest input report of each kind, refreshed by _pump().
         self._last_position = None

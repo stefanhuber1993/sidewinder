@@ -54,11 +54,34 @@ _HAT_NAMES = {
 
 NUM_BUTTONS = 8
 
+# Logical ranges as the device declares them (see `python3 discover.py`).
+# Signed axes are asymmetric: one more step of travel one way than the other.
+X_MIN, X_MAX = -512, 511      # 10-bit signed
+Y_MIN, Y_MAX = -512, 511      # 10-bit signed
+TWIST_MIN, TWIST_MAX = -32, 31  # 6-bit signed
+THROTTLE_MAX = 127            # 7-bit unsigned, 0..127
+
 
 def _signed(value: int, bits: int) -> int:
     """Interpret an unsigned field as two's-complement of the given width."""
     half = 1 << (bits - 1)
     return value - (1 << bits) if value >= half else value
+
+
+def _normalize(value: int, minimum: int, maximum: int) -> float:
+    """
+    Scale a signed axis onto -1.0 .. +1.0, hitting both stops exactly.
+
+    Two's-complement axes have an asymmetric logical range: X is -512..511, not
+    -512..512. Dividing both directions by one half-range therefore can't reach
+    both stops — 511/512 tops out at +0.998 while -512/512 is a clean -1.0.
+
+    Scaling each side by its own extent gives exactly +-1.0 at both stops and
+    keeps centre exactly 0.0. The cost is that the two halves have very slightly
+    different scales (1/511 vs 1/512, i.e. 0.2%), which is far less surprising
+    than a stick that never reads full deflection.
+    """
+    return value / maximum if value >= 0 else value / -minimum
 
 
 @dataclass(frozen=True)
@@ -135,12 +158,12 @@ def decode_input_report(data) -> InputState:
     buttons_raw = data[8]
 
     return InputState(
-        x=x_raw / 512.0,
-        y=y_raw / 512.0,
-        twist=twist_raw / 32.0,
+        x=_normalize(x_raw, X_MIN, X_MAX),
+        y=_normalize(y_raw, Y_MIN, Y_MAX),
+        twist=_normalize(twist_raw, TWIST_MIN, TWIST_MAX),
         # The lever reports 127 at idle and 0 at full forward, so invert it to
         # get the conventional 0 = idle .. 1 = full thrust.
-        throttle=1.0 - (throttle_raw / 127.0),
+        throttle=1.0 - (throttle_raw / THROTTLE_MAX),
         hat=_HAT_VECTORS.get(hat_raw, (0, 0)),
         buttons=tuple(bool(buttons_raw & (1 << i)) for i in range(NUM_BUTTONS)),
     )
