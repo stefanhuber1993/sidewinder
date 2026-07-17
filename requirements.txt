@@ -2,3 +2,4 @@ hid
 numpy
 matplotlib
 ipywidgets
+pytest

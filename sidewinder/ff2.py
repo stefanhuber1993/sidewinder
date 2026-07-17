@@ -38,9 +38,14 @@ R_PID_BLOCK_FREE     = 0x0b
 R_DEVICE_CONTROL     = 0x0c
 R_DEVICE_GAIN        = 0x0d
 
+# ── Input report IDs ──────────────────────────────────────────────────────────
+R_INPUT_JOYSTICK  = 0x01  # axes, hat, buttons — sent continuously
+R_INPUT_PID_STATE = 0x02  # PID state — sent only when FF state changes
+
 # ── Feature report IDs ────────────────────────────────────────────────────────
 FR_CREATE_NEW_EFFECT = 0x01   # SET feature: allocate a new effect block
 FR_PID_BLOCK_LOAD    = 0x02   # GET feature: returned block index + status
+FR_PID_POOL          = 0x03   # GET feature: pool size + simultaneous effect max
 
 # ── Effect type ordinals (HID PID array field, Logical Min 1) ─────────────────
 ET_CONSTANT_FORCE = 1
@@ -313,6 +318,9 @@ class FF2Device:
         target = joystick[0] if joystick else devs[0]
         self._h = hid.Device(path=target['path'])
         # Keep in default (nonblocking) mode; read() with timeout_ms handles blocking.
+        # Newest input report of each kind, refreshed by _pump().
+        self._last_position = None
+        self._last_state = None
 
         if auto_init:
             self.reset()
@@ -541,20 +549,112 @@ class FF2Device:
     def _free_block(self, block: int) -> None:
         self._out([R_PID_BLOCK_FREE, block])
 
-    def read_position(self) -> tuple:
+    # ── Reading from the device ───────────────────────────────────────────────
+
+    def _pump(self, timeout_ms: int) -> None:
         """
-        Read the current joystick X/Y position from the HID interrupt IN report.
-        Returns (x, y) each normalized to -1.0 .. 1.0 (center = 0.0).
-        Returns None if no report-1 packet was available within 20ms.
+        Drain every queued input report, caching the newest of each kind.
+
+        The device pushes position (report 1) continuously at ~125 Hz and PID
+        state (report 2) only when the force state changes, both into one queue
+        that hidapi buffers. Reading a single report would return the *oldest*
+        packet, so a caller polling slowly gets position data seconds stale —
+        drain to the end and keep the last of each.
+
+        Waits up to timeout_ms for a first report if the queue is empty.
         """
-        data = self._h.read(32, 20)   # 20ms timeout; empty list on timeout
-        if not data or data[0] != 1:
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        first = True
+        while True:
+            if first:
+                wait_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                first = False
+            else:
+                wait_ms = 1  # queue already drained to here; don't block
+            data = self._h.read(32, wait_ms)
+            if not data:
+                return
+            if data[0] == R_INPUT_JOYSTICK:
+                self._last_position = data
+            elif data[0] == R_INPUT_PID_STATE:
+                self._last_state = data
+
+    def read_position(self, timeout_ms: int = 20) -> tuple:
+        """
+        Read the current joystick X/Y position from input report 1.
+
+        Returns (x, y) normalized to -1.0..1.0, center = 0.0:
+        x = -1 left / +1 right, y = -1 forward / +1 back.
+        Returns None if no position report has ever arrived.
+
+        Reports queued since the last call are drained, so this always returns
+        the freshest sample rather than replaying a backlog.
+        """
+        self._pump(timeout_ms)
+        data = self._last_position
+        if not data:
             return None
         x_raw = data[1] | ((data[2] & 0x03) << 8)
         y_raw = data[3] | ((data[4] & 0x03) << 8)
         if x_raw >= 512: x_raw -= 1024
         if y_raw >= 512: y_raw -= 1024
         return (x_raw / 512.0, y_raw / 512.0)
+
+    def read_state(self, timeout_ms: int = 20) -> dict:
+        """
+        Read force-feedback status from input report 2 (PID State Report).
+
+        The device sends this report only when the force state changes — an
+        effect starting or stopping, actuators enabled/disabled, device paused —
+        and macOS blocks GET_REPORT on input reports, so it cannot be polled on
+        demand. The latest report seen is cached and returned here.
+
+        Call this often. Position reports flood the same queue at ~125 Hz, so a
+        state report that is not drained promptly is evicted before it is seen,
+        and the cached value silently goes stale. Poll in a loop (or read right
+        after changing state) to track it reliably.
+
+        Note the grip sensor is not reported here: safety_switch does not track
+        it, so there is no way to tell from this report whether force output is
+        currently gated by the hand sensor.
+
+        Returns None if no state report has arrived since the device was opened.
+        Keys: device_paused, actuators_enabled, safety_switch,
+        actuator_override_switch, actuator_power, effect_playing, block.
+        """
+        self._pump(timeout_ms)
+        data = self._last_state
+        if not data:
+            return None
+        flags, playing = data[1], data[2]
+        return {
+            "device_paused":            bool(flags & 0x01),
+            "actuators_enabled":        bool(flags & 0x02),
+            "safety_switch":            bool(flags & 0x04),
+            "actuator_override_switch": bool(flags & 0x08),
+            "actuator_power":           bool(flags & 0x10),
+            "effect_playing":           bool(playing & 0x01),
+            "block":                    playing >> 1,
+        }
+
+    def pool_info(self) -> dict:
+        """
+        Read the PID Pool Report (feature report 3) — static device limits.
+
+        On the FF2: ram_pool_size=1350 bytes, simultaneous_effects_max=15.
+        """
+        r = self._h.get_feature_report(FR_PID_POOL, 5)
+        return {
+            "ram_pool_size":           r[1] | (r[2] << 8),
+            "simultaneous_effects_max": r[3],
+            "device_managed_pool":     bool(r[4] & 0x01),
+            "shared_parameter_blocks": bool(r[4] & 0x02),
+        }
+
+    def ram_available(self) -> int:
+        """Bytes free in the device effect RAM pool (from the Block Load report)."""
+        r = self._h.get_feature_report(FR_PID_BLOCK_LOAD, 5)
+        return r[3] | (r[4] << 8)
 
     def __repr__(self) -> str:
         return f"<FF2Device VID=0x{VID:04x} PID=0x{PID:04x}>"
