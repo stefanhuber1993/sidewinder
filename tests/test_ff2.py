@@ -295,31 +295,37 @@ def test_sine_helper_selects_the_sine_ordinal(dev):
 
 # ── Reading input reports ─────────────────────────────────────────────────────
 
+def input_packet(x=0, y=0):
+    """A full 13-byte report-1 packet, as the device actually sends it."""
+    return [1, x & 0xFF, (x >> 8) & 0x03, y & 0xFF, (y >> 8) & 0x03,
+            0, 0, 8, 0, 0, 0, 0, 0]
+
+
 def test_read_position_decodes_10_bit_signed_axes(dev):
-    # x = 0x0E3|(0x03<<8) = 227|768 = 995 -> 995-1024 = -29 ; y = 6
-    dev.fake.reads = [[1, 227, 255, 6, 0, 0, 0, 8]]
+    # Captured at rest: x = 227 | (3 << 8) = 995 -> 995-1024 = -29 ; y = 6
+    dev.fake.reads = [[1, 227, 255, 6, 0, 0, 0, 8, 0, 0, 0, 0, 0]]
     x, y = dev.read_position()
     assert x == pytest.approx(-29 / 512.0)
     assert y == pytest.approx(6 / 512.0)
 
 
 def test_read_position_centers_at_zero(dev):
-    dev.fake.reads = [[1, 0, 0, 0, 0, 0, 0, 0]]
+    dev.fake.reads = [input_packet()]
     assert dev.read_position() == (0.0, 0.0)
 
 
 def test_read_position_decodes_full_deflection(dev):
     # x = 0 | (2 << 8) = 512 -> 512-1024 = -512 = full left
-    dev.fake.reads = [[1, 0, 2, 0, 0]]
+    dev.fake.reads = [input_packet(x=512)]
     assert dev.read_position() == (-1.0, 0.0)
 
 
 def test_read_position_returns_newest_not_oldest_queued_report(dev):
     # A backlog of stale samples must not be replayed: the last one wins.
     dev.fake.reads = [
-        [1, 0, 2, 0, 0],      # stale: full left
-        [1, 100, 0, 0, 0],    # stale: x=100
-        [1, 255, 1, 0, 0],    # newest: x = 255 | (1<<8) = 511 = full right
+        input_packet(x=512),   # stale: full left
+        input_packet(x=100),   # stale
+        input_packet(x=511),   # newest: full right
     ]
     x, _ = dev.read_position()
     assert x == pytest.approx(511 / 512.0)
@@ -327,7 +333,7 @@ def test_read_position_returns_newest_not_oldest_queued_report(dev):
 
 
 def test_read_position_skips_interleaved_state_reports(dev):
-    dev.fake.reads = [[2, 54, 0], [1, 0, 2, 0, 0]]
+    dev.fake.reads = [[2, 54, 0], input_packet(x=512)]
     assert dev.read_position() == (-1.0, 0.0)
 
 
@@ -337,7 +343,7 @@ def test_read_position_returns_none_when_nothing_ever_arrived(dev):
 
 
 def test_read_position_keeps_last_sample_when_queue_is_empty(dev):
-    dev.fake.reads = [[1, 100, 0, 0, 0]]
+    dev.fake.reads = [input_packet(x=100)]
     first = dev.read_position()
     assert dev.read_position() == first  # no new data: same answer, not None
 
@@ -376,9 +382,46 @@ def test_read_state_caches_last_state_across_calls(dev):
 
 
 def test_pump_does_not_let_position_reads_swallow_state_reports(dev):
-    dev.fake.reads = [[2, 54, 0x05], [1, 100, 0, 0, 0]]
+    dev.fake.reads = [[2, 54, 0x05], input_packet(x=100)]
     dev.read_position()                      # drains both
     assert dev.read_state()["block"] == 2    # state survived the drain
+
+
+def test_read_input_decodes_every_control(dev):
+    # twist=+31, thrust raw 0 = full forward, hat=right(2), buttons 1 and 8
+    dev.fake.reads = [[1, 0, 0, 0, 0, 31, 0, 2, 0b10000001, 0, 0, 0, 0]]
+    s = dev.read_input()
+    assert s.twist == pytest.approx(31 / 32)
+    assert s.throttle == 1.0
+    assert s.hat == (1, 0)
+    assert s.pressed == (1, 8)
+
+
+def test_read_input_returns_none_before_any_report(dev):
+    dev.fake.reads = []
+    assert dev.read_input() is None
+
+
+def test_read_position_still_returns_just_the_axes(dev):
+    dev.fake.reads = [[1, 255, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0]]
+    assert dev.read_position() == (pytest.approx(511 / 512), 0.0)
+
+
+def test_get_events_baselines_on_first_call(dev):
+    dev.fake.reads = [[1, 0, 0, 0, 0, 0, 0, 8, 0b1, 0, 0, 0, 0]]
+    assert dev.get_events() == []  # held button is not a fresh press
+
+
+def test_get_events_reports_presses_between_calls(dev):
+    dev.fake.reads = [[1, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0]]
+    dev.get_events()
+    dev.fake.reads = [[1, 0, 0, 0, 0, 0, 0, 8, 0b100, 0, 0, 0, 0]]
+    assert dev.get_events() == [ff2mod.ButtonDown(3)]
+
+
+def test_get_events_returns_nothing_without_a_report(dev):
+    dev.fake.reads = []
+    assert dev.get_events() == []
 
 
 def test_pool_info_decodes_feature_report_3(dev):

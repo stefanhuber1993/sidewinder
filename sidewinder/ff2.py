@@ -18,9 +18,13 @@ Quick start::
 
     ff.close()
 """
-import math
 import time
 import hid
+
+from sidewinder.controls import (
+    ButtonDown, ButtonUp, HatMoved, InputState,
+    decode_input_report, diff_states,
+)
 
 VID = 0x045e
 PID = 0x001b
@@ -321,6 +325,7 @@ class FF2Device:
         # Newest input report of each kind, refreshed by _pump().
         self._last_position = None
         self._last_state = None
+        self._prev_input = None  # baseline for get_events() edge detection
 
         if auto_init:
             self.reset()
@@ -579,26 +584,66 @@ class FF2Device:
             elif data[0] == R_INPUT_PID_STATE:
                 self._last_state = data
 
+    def read_input(self, timeout_ms: int = 20) -> InputState:
+        """
+        Read every control at once: axes, twist, thrust lever, hat, buttons.
+
+        Returns the newest InputState, or None if no input report has arrived
+        since the device was opened. See sidewinder.controls.InputState.
+
+            s = ff.read_input()
+            if s.button(1):
+                fire()
+            throttle = s.throttle       # 0.0 idle .. 1.0 full forward
+
+        Careful: pushing the stick FORWARD gives NEGATIVE s.y (-1.0 forward,
+        +1.0 back toward you). Use -s.y if you want forward to be positive.
+        The hat is the other way round: its dy = +1 is forward.
+        """
+        self._pump(timeout_ms)
+        if not self._last_position:
+            return None
+        return decode_input_report(self._last_position)
+
     def read_position(self, timeout_ms: int = 20) -> tuple:
         """
         Read the current joystick X/Y position from input report 1.
 
         Returns (x, y) normalized to -1.0..1.0, center = 0.0:
-        x = -1 left / +1 right, y = -1 forward / +1 back.
-        Returns None if no position report has ever arrived.
+            x = -1.0 left    / +1.0 right
+            y = -1.0 FORWARD / +1.0 back (toward you)
 
-        Reports queued since the last call are drained, so this always returns
-        the freshest sample rather than replaying a backlog.
+        Note the y sign: pushing the stick away from you gives NEGATIVE y,
+        following the hardware and pygame. Use -y if you want forward positive.
+
+        Returns None if no position report has ever arrived. Shorthand for
+        read_input().x / .y — see read_input() for the rest of the controls.
         """
-        self._pump(timeout_ms)
-        data = self._last_position
-        if not data:
-            return None
-        x_raw = data[1] | ((data[2] & 0x03) << 8)
-        y_raw = data[3] | ((data[4] & 0x03) << 8)
-        if x_raw >= 512: x_raw -= 1024
-        if y_raw >= 512: y_raw -= 1024
-        return (x_raw / 512.0, y_raw / 512.0)
+        state = self.read_input(timeout_ms)
+        return None if state is None else (state.x, state.y)
+
+    def get_events(self, timeout_ms: int = 0) -> list:
+        """
+        Return button and hat events since the last call, oldest first.
+
+        Edge-detected against the previous snapshot, so it fits an engine's
+        frame loop the way pygame.event.get() does:
+
+            for event in ff.get_events():
+                if isinstance(event, ButtonDown) and event.button == 1:
+                    fire()
+
+        The first call establishes a baseline and returns [] rather than
+        reporting already-held buttons as new presses. Events are only detected
+        between successive calls, so a button tapped and released entirely
+        between two calls is missed — poll once per frame.
+        """
+        state = self.read_input(timeout_ms)
+        if state is None:
+            return []
+        events = diff_states(self._prev_input, state)
+        self._prev_input = state
+        return events
 
     def read_state(self, timeout_ms: int = 20) -> dict:
         """
