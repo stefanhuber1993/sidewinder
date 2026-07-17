@@ -387,6 +387,59 @@ def test_pump_does_not_let_position_reads_swallow_state_reports(dev):
     assert dev.read_state()["block"] == 2    # state survived the drain
 
 
+# ── Cross-platform wire safety ────────────────────────────────────────────────
+
+# Full length of each output report (report ID + payload), taken from the
+# device's HID report descriptor — run `python3 discover.py` to print it.
+DECLARED_OUTPUT_LENGTHS = {
+    0x01: 16,  # Set Effect
+    0x02: 8,   # Set Envelope
+    0x03: 9,   # Set Condition
+    0x04: 7,   # Set Periodic
+    0x05: 4,   # Set Constant Force
+    0x06: 4,   # Set Ramp Force
+    0x0A: 4,   # Effect Operation
+    0x0B: 2,   # PID Block Free
+    0x0C: 2,   # Device Control
+    0x0D: 2,   # Device Gain
+}
+
+
+def test_every_output_report_is_written_at_full_declared_length(dev):
+    """
+    Windows requires an output report buffer to be exactly the declared report
+    length; macOS tolerates a short write. A short report here would keep
+    working on macOS and silently break Windows, so pin the lengths.
+    """
+    dev.constant_force(angle_deg=270)
+    dev.sine()
+    dev.spring()
+    dev.damper()
+    dev.ramp_force()
+    dev.set_gain(200)
+    dev.pause()
+    dev.resume()
+    e = Effect(dev, block=3, effect_type=ff2mod.ET_SINE)
+    e.set_envelope(attack_ms=1)
+    e.free()
+
+    seen = set()
+    for w in dev.fake.writes:
+        report_id = w[0]
+        expected = DECLARED_OUTPUT_LENGTHS[report_id]
+        assert len(w) == expected, (
+            f"report 0x{report_id:02x} written as {len(w)} bytes, "
+            f"device declares {expected}")
+        seen.add(report_id)
+    assert seen == set(DECLARED_OUTPUT_LENGTHS), "not every output report exercised"
+
+
+def test_create_new_effect_feature_report_is_full_length(dev):
+    # Effect Type (8 bits) + Byte Count (10 bits) + 6 pad = 3 bytes + report ID.
+    dev.alloc(ff2mod.ET_SPRING)
+    assert len(dev.fake.features[0]) == 4
+
+
 def test_read_input_decodes_every_control(dev):
     # twist=+31, thrust raw 0 = full forward, hat=right(2), buttons 1 and 8
     dev.fake.reads = [[1, 0, 0, 0, 0, 31, 0, 2, 0b10000001, 0, 0, 0, 0]]

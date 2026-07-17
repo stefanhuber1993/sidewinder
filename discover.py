@@ -9,7 +9,9 @@ the ground truth for the packet layouts encoded in sidewinder/ff2.py. Report IDs
 are device-specific (declared in the descriptor, not fixed by the PID spec), so
 this is the tool to check against if a report ever stops behaving.
 
-Reads the descriptor through hidapi/IOKit — no sudo, no libusb.
+Reads the descriptor through hidapi — no sudo, no libusb. Also the quickest way
+to check whether the joystick is reachable at all on a new platform: if this
+prints a descriptor, the device is talking to you.
 """
 import hid
 

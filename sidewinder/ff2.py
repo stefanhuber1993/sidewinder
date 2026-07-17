@@ -1,8 +1,15 @@
 """
 sidewinder/ff2.py — Microsoft Sidewinder Force Feedback 2 driver.
 
-Uses python-hid (hidapi / IOKit) so no sudo is needed on macOS.
-Requires: brew install hidapi  &&  pip install hid
+Uses python-hid (hidapi), which shares the device with the OS driver rather than
+claiming it, so no sudo is needed (on Linux, a udev rule — see the README).
+
+Requires the native hidapi library plus `pip install hid`:
+    macOS   brew install hidapi
+    Linux   apt install libhidapi-hidraw0   (or your distro's package)
+    Windows hidapi.dll on PATH
+
+Written and verified on macOS; nothing here is platform-specific.
 
 Full HID PID protocol implementation for all effect types.
 Designed for interactive use in Jupyter notebooks.
@@ -295,7 +302,7 @@ class FF2Device:
     """
     Microsoft SideWinder Force Feedback 2 — HID PID driver.
 
-    Uses python-hid (IOKit HID Manager) — no sudo required on macOS.
+    Uses python-hid (hidapi) — no sudo required (Linux needs a udev rule).
 
     Use as a context manager or call .close() explicitly::
 
@@ -314,7 +321,8 @@ class FF2Device:
             raise RuntimeError(
                 "Sidewinder FF2 not found (VID=0x045e PID=0x001b)\n"
                 "Check: is the joystick plugged in?\n"
-                "Setup:  brew install hidapi  &&  pip install hid"
+                "Setup: run ./setup.sh, or install hidapi + `pip install hid`.\n"
+                "On Linux, /dev/hidraw* needs a udev rule — see the README."
             )
         # Prefer the Joystick collection (Generic Desktop / Joystick, usage 0x04)
         # which holds both axis input and HID PID force-feedback output reports.
@@ -592,9 +600,16 @@ class FF2Device:
         since the device was opened. See sidewinder.controls.InputState.
 
             s = ff.read_input()
-            if s.button(1):
+            if s is not None and s.button(1):
                 fire()
-            throttle = s.throttle       # 0.0 idle .. 1.0 full forward
+
+        Expect None on the first reads. The device only sends an input report
+        when something *changes*, so a perfectly still joystick sends nothing at
+        all and there is nothing to report yet — and macOS refuses GET_REPORT on
+        input reports, so the state cannot be fetched on demand either. Nudge the
+        stick, or just tolerate None until the first report lands. After that a
+        cached value is always available, and it stays correct: no report means
+        nothing changed.
 
         Careful: pushing the stick FORWARD gives NEGATIVE s.y (-1.0 forward,
         +1.0 back toward you). Use -s.y if you want forward to be positive.

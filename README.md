@@ -1,8 +1,11 @@
-# Sidewinder FF2 — Force Feedback on macOS
+# Sidewinder FF2 — Force Feedback in Python
 
-Python driver for the **Microsoft SideWinder Force Feedback 2** joystick on macOS.
-Send force effects and read every control — stick, twist, thrust lever, hat and
+Python driver for the **Microsoft SideWinder Force Feedback 2** joystick. Send
+force effects and read every control — stick, twist, thrust lever, hat and
 buttons — from a script, a game loop, or a Jupyter notebook, without sudo.
+
+Written and verified on macOS. It's plain HID with no platform-specific code, so
+Linux and Windows should work too — see [Platform support](#platform-support).
 
 ---
 
@@ -24,34 +27,48 @@ Logitech/Thrustmaster.
 ## Architecture
 
 ```
-your code  →  sidewinder/ff2.py  →  hid (hidapi)  →  IOKit HID Manager  →  FF2
-                                                            ↕
-                                                     macOS joystick driver
-                                                     (axes/buttons keep working)
+your code  →  sidewinder/ff2.py  →  hid (hidapi)  →  OS HID stack  →  FF2
+                                                          ↕
+                                                    IOKit    (macOS)
+                                                    hidraw   (Linux)
+                                                    hid.dll  (Windows)
 ```
 
-The driver talks to the device through **hidapi**, which on macOS is backed by the
-**IOKit HID Manager** — an API built for user-space HID access. It shares the
-device with the OS driver rather than claiming it, so:
+The driver talks to the device through **hidapi**, which wraps whatever HID API
+the OS provides. It *shares* the device with the OS driver rather than claiming
+it, so:
 
-- **No sudo.** Nothing needs root.
 - **No exclusive access.** The OS joystick driver keeps reading axes and buttons
   normally; force output reports flow alongside its input.
+- **No sudo** on macOS or Windows — these HID APIs are built for user-space
+  access. Linux needs a one-line udev rule, because `/dev/hidraw*` is root-only
+  by default.
 
-(A `pyusb`/`libusb` approach would instead claim the device exclusively and detach
-the IOHIDFamily kernel driver — which is what requires root.)
+(A `pyusb`/`libusb` approach would instead claim the device exclusively and
+detach the kernel HID driver — which is what requires root.)
 
 ## Setup
 
 ```bash
-brew install hidapi      # native hidapi library (IOKit backend)
-./setup.sh               # creates venv, installs Python deps
+./setup.sh               # installs hidapi, creates venv, installs Python deps
 source venv/bin/activate
 
 python3 demo.py          # runs the effect demo — hold the stick
 python3 monitor.py       # live view of every control
 jupyter lab notebook.ipynb   # interactive effect lab with live sliders
 ```
+
+`setup.sh` installs the native hidapi library for your platform (Homebrew on
+macOS; apt/dnf/pacman on Linux) and prints the udev rule if you're on Linux. To
+install hidapi yourself:
+
+| Platform | Command |
+|---|---|
+| macOS | `brew install hidapi` |
+| Debian / Ubuntu | `sudo apt install libhidapi-hidraw0` |
+| Fedora | `sudo dnf install hidapi` |
+| Arch | `sudo pacman -S hidapi` |
+| Windows | see [Platform support](#platform-support) — needs `hidapi.dll` |
 
 The pygame demo needs one extra package, deliberately left out of
 `requirements.txt` because only the example uses it:
@@ -60,6 +77,61 @@ The pygame demo needs one extra package, deliberately left out of
 pip install pygame                      # optional
 python3 examples/pygame_demo.py         # fly a ship with force feedback
 ```
+
+---
+
+## Platform support
+
+| Platform | Status |
+|---|---|
+| **macOS** | **Verified.** Every byte layout, angle and range in this README was measured on real hardware here. |
+| **Linux** | *Expected to work, untested.* Needs a udev rule for non-root access. |
+| **Windows** | *Expected to work, untested.* Needs `hidapi.dll` next to your Python or on `PATH`. |
+
+Nothing in the driver is macOS-specific — it only ever calls `hid.enumerate`,
+`hid.Device`, `write`, `read`, `send_feature_report` and `get_feature_report`,
+which hidapi implements on all three platforms. The device is the same USB HID
+PID device everywhere, so the protocol doesn't change.
+
+The one portability trap worth knowing about: **Windows requires every output
+report to be written at exactly its declared length**, while macOS tolerates a
+short write. The driver already writes full-length reports for all ten output
+reports, and a test pins that (`test_every_output_report_is_written_at_full_declared_length`)
+so a short write can't sneak in and break Windows while still passing on macOS.
+
+If you try it on Linux or Windows, the fastest check is `python3 discover.py`
+(does it enumerate and dump the descriptor?) then `python3 monitor.py` (do the
+controls read?). Reports of either working are welcome.
+
+### Linux
+
+`/dev/hidraw*` is root-only by default, so grant access to this device once:
+
+```bash
+echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="001b", MODE="0666"' \
+  | sudo tee /etc/udev/rules.d/99-sidewinder-ff2.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Then unplug and replug the joystick. Without it you'll get a permission error
+opening the device (or it won't appear at all).
+
+Linux also has a kernel driver for this joystick — `hid-pidff` — which exposes
+force feedback through evdev. This library ignores it and speaks HID PID
+directly, which should coexist fine, but it does mean two things can drive the
+motors if you also use an evdev-based FF app at the same time.
+
+### Windows
+
+The `hid` package binds to hidapi but doesn't ship it, so you need `hidapi.dll`
+from the [hidapi releases](https://github.com/libusb/hidapi/releases) placed next
+to your Python executable or somewhere on `PATH`. (`pip install hidapi` is a
+*different*, source-built package with a different API — it won't work as a
+drop-in here.)
+
+Windows exposes this joystick's force feedback through DirectInput as well; this
+library bypasses that and talks to the device directly, so it doesn't need
+DirectInput or any game to be running.
 
 ---
 
@@ -208,6 +280,13 @@ The joystick sends every control in one input report, so a single
 `read_input()` gives you the whole stick. Reading needs no force feedback and no
 grip on the stick, and doesn't disturb the OS joystick driver.
 
+> **`read_input()` returns `None` until the first report arrives** — usually only
+> at startup, but it can persist. The device reports only when something
+> *changes*, so a perfectly still joystick sends nothing (and macOS won't let you
+> ask for the state on demand). Touch the stick, or tolerate `None` for the first
+> few frames; a loop naturally rides through it. Once one report has landed there
+> is always a cached value, and it stays correct — no report means nothing moved.
+
 ```python
 s = ff.read_input()
 
@@ -303,6 +382,8 @@ while running:
     for event in pygame.event.get():  # keyboard, window
         ...
     s = ff.read_input()               # joystick state, this frame
+    if s is None:                     # nothing reported yet — skip this frame
+        continue
     for e in ff.get_events():         # joystick edges
         if isinstance(e, ButtonDown) and e.button == 1:
             fire()
@@ -470,9 +551,11 @@ Input report 1 is 13 bytes and packs the controls at bit-level offsets:
 - **Input report bytes 9–12 are declared constant but aren't.** The descriptor
   marks them as padding, yet they carry live signed values that track stick
   motion — undocumented vendor data. The driver ignores them; don't rely on them.
-- **PID state can't be polled.** macOS rejects `GET_REPORT` on input reports
-  (`IOHIDDeviceGetReport` fails), so `read_state()` depends on the device pushing
-  report 2 when the state changes rather than asking for it.
+- **PID state can't be polled** *(macOS)*. macOS rejects `GET_REPORT` on input
+  reports (`IOHIDDeviceGetReport` fails), so `read_state()` depends on the device
+  pushing report 2 when the state changes rather than asking for it. Linux and
+  Windows may well allow `get_input_report` here, which would make state
+  properly pollable — untested.
 - **State reports get evicted if you read slowly.** Report 2 shares the input
   queue with report 1 at ~125 Hz, and the queue is finite. Poll once a second and
   the flood of position data drops the state change before you drain it — the
@@ -482,19 +565,33 @@ Input report 1 is 13 bytes and packs the controls at bit-level offsets:
   while you aren't reading, and a plain read returns the *oldest* one — poll
   slowly and you get position data seconds behind reality. `read_position()`
   drains to the newest sample for you.
+- **A still joystick sends nothing.** Input reports are sent on change, not on a
+  timer — hold the stick perfectly still and you may see two reports in two
+  seconds. So `read_input()` returns `None` until the first one lands, and on
+  macOS you can't fall back to `GET_REPORT` to ask for the state. Handle `None`
+  on the first frames rather than treating it as an error.
 - **Effect blocks are a finite pool** — 1350 bytes, 15 simultaneous effects.
   Always `free()` effects (or use the context manager); allocation raises
   `RuntimeError: ... Full` once the pool is exhausted.
 - **Report IDs are device-specific.** HID PID declares them in the report
   descriptor, not the spec. Verify with `discover.py` before trusting any layout.
-- **Multiple HID collections.** `hid.enumerate()` returns two entries for this
-  VID/PID (usage 1 and usage 4). The driver picks the Joystick collection
-  (usage page 1, usage 4) — the one carrying both axes and the PID reports.
+- **Multiple HID collections.** On macOS and Windows, `hid.enumerate()` returns
+  one entry per top-level collection — two for this VID/PID (usage 1 and usage
+  4). The driver picks the Joystick collection (usage page 1, usage 4), the one
+  carrying both axes and the PID reports. Linux hidraw enumerates one node for
+  the whole device and may report usage as 0, so the driver falls back to the
+  first entry, which is the same device.
 - **hidapi `write()` takes the report ID as byte 0.** The FF2 uses numbered
   reports (0x01–0x0d), so no zero-prefix padding is needed.
-- **No macOS game support.** macOS's `ForceFeedback.framework` is deprecated and
-  SDL2 never properly implemented it for this device, so effects have to be driven
-  directly as here.
+- **Output reports must be full length on Windows.** Windows rejects a write
+  shorter than the report's declared length, where macOS accepts it. The driver
+  always writes full-length reports and a test enforces it — worth knowing if you
+  add a new report by hand.
+- **No macOS game support** *(macOS)*. macOS's `ForceFeedback.framework` is
+  deprecated and SDL2 never properly implemented it for this device, so effects
+  have to be driven directly as here. Windows has DirectInput force feedback and
+  Linux has `hid-pidff`, so on those platforms this library is one option rather
+  than the only one.
 
 ---
 
