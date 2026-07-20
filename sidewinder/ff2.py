@@ -414,7 +414,7 @@ class FF2Device:
         # Create New Effect — SET feature report
         self._h.send_feature_report(bytes([FR_CREATE_NEW_EFFECT, effect_type, 0x00, 0x00]))
         # PID Block Load — GET feature report (returns report_id + block + status + ram_lo + ram_hi)
-        resp = self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6)
+        resp = self._get_feature_report(FR_PID_BLOCK_LOAD, 5)
         block, status = resp[1], resp[2]
         if status != 1:
             raise RuntimeError(
@@ -566,6 +566,18 @@ class FF2Device:
         # data[0] is the HID output report ID; hid.write sends an interrupt-OUT report
         self._h.write(bytes(data))
 
+    def _get_feature_report(self, report_id: int, size: int, retries: int = 5) -> bytes:
+        # hidapi occasionally returns a short read for feature reports right
+        # after a device reset; retry rather than let callers index out of range.
+        for _ in range(retries):
+            r = self._h.get_feature_report(report_id, size)
+            if len(r) >= size:
+                return r
+        raise RuntimeError(
+            f"Feature report {report_id} kept returning short reads "
+            f"(wanted {size} bytes, got {len(r)})"
+        )
+
     def _effect_op(self, block: int, operation: int, loop_count: int) -> None:
         self._out([R_EFFECT_OPERATION, block, operation, loop_count & 0xFF])
 
@@ -713,7 +725,7 @@ class FF2Device:
 
         On the FF2: ram_pool_size=1350 bytes, simultaneous_effects_max=15.
         """
-        r = self._h.get_feature_report(FR_PID_POOL, 5)
+        r = self._get_feature_report(FR_PID_POOL, 5)
         return {
             "ram_pool_size":           r[1] | (r[2] << 8),
             "simultaneous_effects_max": r[3],
@@ -723,7 +735,7 @@ class FF2Device:
 
     def ram_available(self) -> int:
         """Bytes free in the device effect RAM pool (from the Block Load report)."""
-        r = self._h.get_feature_report(FR_PID_BLOCK_LOAD, 5)
+        r = self._get_feature_report(FR_PID_BLOCK_LOAD, 5)
         return r[3] | (r[4] << 8)
 
     def __repr__(self) -> str:
