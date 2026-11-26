@@ -58,6 +58,9 @@ FR_CREATE_NEW_EFFECT = 0x01   # SET feature: allocate a new effect block
 FR_PID_BLOCK_LOAD    = 0x02   # GET feature: returned block index + status
 FR_PID_POOL          = 0x03   # GET feature: pool size + simultaneous effect max
 
+# How many times alloc() re-reads a short/garbled PID Block Load reply.
+_BLOCK_LOAD_READ_ATTEMPTS = 5
+
 # ── Effect type ordinals (HID PID array field, Logical Min 1) ─────────────────
 ET_CONSTANT_FORCE = 1
 ET_RAMP           = 2
@@ -413,8 +416,22 @@ class FF2Device:
         """
         # Create New Effect — SET feature report
         self._h.send_feature_report(bytes([FR_CREATE_NEW_EFFECT, effect_type, 0x00, 0x00]))
-        # PID Block Load — GET feature report (returns report_id + block + status + ram_lo + ram_hi)
-        resp = self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6)
+        # PID Block Load — GET feature report (returns report_id + block + status + ram_lo + ram_hi).
+        # On macOS the reply sometimes comes back one byte short, with the block
+        # index missing: [2, status, ram_lo, ram_hi]. Parsing that as-is reads
+        # ram_lo as the status. The device keeps answering with the same Block
+        # Load result until the next Create New Effect, so re-read until it is whole.
+        resp = b""
+        for _ in range(_BLOCK_LOAD_READ_ATTEMPTS):
+            resp = self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6)
+            if len(resp) >= 5 and resp[0] == FR_PID_BLOCK_LOAD and resp[2] in (1, 2, 3):
+                break
+            time.sleep(0.002)
+        else:
+            raise RuntimeError(
+                "Effect block allocation failed: malformed PID Block Load reply "
+                f"{list(resp)} (expected [2, block, status, ram_lo, ram_hi])"
+            )
         block, status = resp[1], resp[2]
         if status != 1:
             raise RuntimeError(
