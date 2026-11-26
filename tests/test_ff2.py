@@ -175,6 +175,21 @@ def test_alloc_rejects_malformed_block_load_reply(dev, reply, monkeypatch):
         dev.alloc(ff2mod.ET_SINE)
 
 
+
+def test_pool_info_rereads_a_short_reply(dev, monkeypatch):
+    # PR #1: on Linux, feature reads right after a reset can come back short.
+    # Every feature read goes through the same retry, not just Block Load.
+    replies = [bytes([3, 0x46]), bytes([3, 0x46, 0x05, 15, 0x01])]
+    monkeypatch.setattr(dev.fake, "get_feature_report", lambda rid, n: replies.pop(0))
+    assert dev.pool_info()["simultaneous_effects_max"] == 15
+    assert replies == []
+
+
+def test_ram_available_gives_up_on_a_persistently_short_reply(dev):
+    dev.fake.feature_responses[ff2mod.FR_PID_BLOCK_LOAD] = bytes([2, 1])
+    with pytest.raises(RuntimeError, match="malformed feature report 0x02 reply"):
+        dev.ram_available()
+
 # ── Set Effect (report 0x01) ──────────────────────────────────────────────────
 
 def test_set_base_matches_descriptor_layout(dev):

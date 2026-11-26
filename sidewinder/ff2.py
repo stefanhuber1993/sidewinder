@@ -61,8 +61,11 @@ FR_CREATE_NEW_EFFECT = 0x01   # SET feature: allocate a new effect block
 FR_PID_BLOCK_LOAD    = 0x02   # GET feature: returned block index + status
 FR_PID_POOL          = 0x03   # GET feature: pool size + simultaneous effect max
 
-# How many times alloc() re-reads a short/garbled PID Block Load reply.
-_BLOCK_LOAD_READ_ATTEMPTS = 5
+# How many times a short/garbled feature report reply is re-read, and the
+# pause between reads. Short replies are intermittent (seen right after a
+# device reset on Linux, and on Block Load on macOS); the next read is whole.
+_FEATURE_READ_ATTEMPTS = 5
+_FEATURE_READ_PAUSE_S = 0.002
 
 # ── Effect type ordinals (HID PID array field, Logical Min 1) ─────────────────
 ET_CONSTANT_FORCE = 1
@@ -424,19 +427,14 @@ class FF2Device:
         # index missing: [2, status, ram_lo, ram_hi]. Parsing that as-is reads
         # ram_lo as the status. The device keeps answering with the same Block
         # Load result until the next Create New Effect, so re-read until it is whole.
-        resp = b""
-        for _ in range(_BLOCK_LOAD_READ_ATTEMPTS):
-            resp = bytes(self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6))
-            if len(resp) >= 5 and resp[0] == FR_PID_BLOCK_LOAD and resp[2] in (1, 2, 3):
-                break
-            time.sleep(0.002)
-        else:
-            raise RuntimeError(
-                "Effect block allocation failed for effect type "
-                f"0x{effect_type:02x}: malformed PID Block Load reply "
-                f"{resp.hex(' ') or '(empty)'} after {_BLOCK_LOAD_READ_ATTEMPTS} reads "
-                "(expected 02 <block> <status 1-3> <ram_lo> <ram_hi>)"
-            )
+        # Asks for 6 bytes although the report is 5: that is what has run on the
+        # hardware on macOS, and Linux returns the true 5 either way.
+        resp = self._get_feature_report(
+            FR_PID_BLOCK_LOAD, 6, min_len=5,
+            valid=lambda r: r[2] in (1, 2, 3),          # Success / Full / Error
+            what=f"PID Block Load reply (allocating effect type 0x{effect_type:02x})",
+            expected="02 <block> <status 1-3> <ram_lo> <ram_hi>",
+        )
         block, status = resp[1], resp[2]
         if status != 1:
             raise RuntimeError(
@@ -589,6 +587,33 @@ class FF2Device:
         # data[0] is the HID output report ID; hid.write sends an interrupt-OUT report
         self._h.write(bytes(data))
 
+    def _get_feature_report(self, report_id: int, size: int, min_len: int = None,
+                            valid=None, what: str = None, expected: str = None) -> bytes:
+        """GET a feature report, re-reading short or garbled replies.
+
+        A reply counts if it is at least `min_len` bytes (default `size`), starts
+        with `report_id`, and passes `valid(reply)` if given. hidapi occasionally
+        hands back a short read -- right after a device reset on Linux, and for
+        the Block Load report on macOS -- and indexing that would read the wrong
+        byte or raise IndexError.
+        """
+        min_len = size if min_len is None else min_len
+        resp = b""
+        for attempt in range(_FEATURE_READ_ATTEMPTS):
+            resp = bytes(self._h.get_feature_report(report_id, size))
+            if (len(resp) >= min_len and resp[0] == report_id
+                    and (valid is None or valid(resp))):
+                return resp
+            if attempt + 1 < _FEATURE_READ_ATTEMPTS:
+                time.sleep(_FEATURE_READ_PAUSE_S)
+        what = what or f"feature report 0x{report_id:02x} reply"
+        raise RuntimeError(
+            f"malformed {what}: {resp.hex(' ') or '(empty)'} after "
+            f"{_FEATURE_READ_ATTEMPTS} reads"
+            + (f" (expected {expected})" if expected else
+               f" (expected {min_len}+ bytes starting with 0x{report_id:02x})")
+        )
+
     def _effect_op(self, block: int, operation: int, loop_count: int) -> None:
         self._out([R_EFFECT_OPERATION, block, operation, loop_count & 0xFF])
 
@@ -736,7 +761,7 @@ class FF2Device:
 
         On the FF2: ram_pool_size=1350 bytes, simultaneous_effects_max=15.
         """
-        r = self._h.get_feature_report(FR_PID_POOL, 5)
+        r = self._get_feature_report(FR_PID_POOL, 5)
         return {
             "ram_pool_size":           r[1] | (r[2] << 8),
             "simultaneous_effects_max": r[3],
@@ -746,7 +771,7 @@ class FF2Device:
 
     def ram_available(self) -> int:
         """Bytes free in the device effect RAM pool (from the Block Load report)."""
-        r = self._h.get_feature_report(FR_PID_BLOCK_LOAD, 5)
+        r = self._get_feature_report(FR_PID_BLOCK_LOAD, 5)
         return r[3] | (r[4] << 8)
 
     def __repr__(self) -> str:
