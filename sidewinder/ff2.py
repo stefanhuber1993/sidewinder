@@ -61,6 +61,9 @@ FR_CREATE_NEW_EFFECT = 0x01   # SET feature: allocate a new effect block
 FR_PID_BLOCK_LOAD    = 0x02   # GET feature: returned block index + status
 FR_PID_POOL          = 0x03   # GET feature: pool size + simultaneous effect max
 
+# How many times alloc() re-reads a short/garbled PID Block Load reply.
+_BLOCK_LOAD_READ_ATTEMPTS = 5
+
 # ── Effect type ordinals (HID PID array field, Logical Min 1) ─────────────────
 ET_CONSTANT_FORCE = 1
 ET_RAMP           = 2
@@ -416,16 +419,23 @@ class FF2Device:
         """
         # Create New Effect — SET feature report
         self._h.send_feature_report(bytes([FR_CREATE_NEW_EFFECT, effect_type, 0x00, 0x00]))
-        # PID Block Load — GET feature report (returns report_id + block + status + ram_lo + ram_hi)
-        resp = bytes(self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6))
-        # Check the shape before trusting the offsets: a short reply, or one
-        # without the report ID in front, would otherwise be misread as a
-        # failed status (or an IndexError) with no hint of what came back.
-        if len(resp) < 3 or resp[0] != FR_PID_BLOCK_LOAD:
+        # PID Block Load — GET feature report (returns report_id + block + status + ram_lo + ram_hi).
+        # On macOS the reply sometimes comes back one byte short, with the block
+        # index missing: [2, status, ram_lo, ram_hi]. Parsing that as-is reads
+        # ram_lo as the status. The device keeps answering with the same Block
+        # Load result until the next Create New Effect, so re-read until it is whole.
+        resp = b""
+        for _ in range(_BLOCK_LOAD_READ_ATTEMPTS):
+            resp = bytes(self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6))
+            if len(resp) >= 5 and resp[0] == FR_PID_BLOCK_LOAD and resp[2] in (1, 2, 3):
+                break
+            time.sleep(0.002)
+        else:
             raise RuntimeError(
-                "Unexpected PID Block Load reply while allocating effect type "
-                f"0x{effect_type:02x}: {resp.hex(' ') or '(empty)'} -- expected "
-                f"at least 3 bytes starting with report ID 0x{FR_PID_BLOCK_LOAD:02x}"
+                "Effect block allocation failed for effect type "
+                f"0x{effect_type:02x}: malformed PID Block Load reply "
+                f"{resp.hex(' ') or '(empty)'} after {_BLOCK_LOAD_READ_ATTEMPTS} reads "
+                "(expected 02 <block> <status 1-3> <ram_lo> <ram_hi>)"
             )
         block, status = resp[1], resp[2]
         if status != 1:

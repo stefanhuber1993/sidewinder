@@ -147,12 +147,31 @@ def test_alloc_raises_when_device_pool_is_full(dev):
         dev.alloc(ff2mod.ET_SINE)
 
 
+def test_alloc_rereads_block_load_reply_missing_block_byte(dev, monkeypatch):
+    # Seen on macOS: the first reply drops the block index, so ram_lo (141)
+    # lands where the status belongs. The second read is whole.
+    replies = [bytes([2, 1, 141, 4]), bytes([2, 4, 1, 141, 4])]
+    monkeypatch.setattr(ff2mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(dev.fake, "get_feature_report", lambda rid, n: replies.pop(0))
+    e = dev.alloc(ff2mod.ET_SINE)
+    assert e.block == 4
+    assert replies == []
+
+
+def test_alloc_raises_on_persistently_malformed_reply(dev, monkeypatch):
+    monkeypatch.setattr(ff2mod.time, "sleep", lambda s: None)
+    dev.fake.feature_responses[ff2mod.FR_PID_BLOCK_LOAD] = bytes([2, 1, 185, 4])
+    with pytest.raises(RuntimeError, match="malformed"):
+        dev.alloc(ff2mod.ET_DAMPER)
+
+
 @pytest.mark.parametrize("reply", [b"", bytes([2, 1]), bytes([1, 1, 1, 0x17, 0x05])])
-def test_alloc_rejects_malformed_block_load_reply(dev, reply):
-    # Too short, or a different report ID in front: say what came back instead
-    # of reading the wrong byte as the status.
+def test_alloc_rejects_malformed_block_load_reply(dev, reply, monkeypatch):
+    # Too short, or a different report ID in front, on every read: say what came
+    # back instead of reading the wrong byte as the status.
+    monkeypatch.setattr(ff2mod.time, "sleep", lambda s: None)
     dev.fake.feature_responses[ff2mod.FR_PID_BLOCK_LOAD] = reply
-    with pytest.raises(RuntimeError, match="Unexpected PID Block Load reply"):
+    with pytest.raises(RuntimeError, match="malformed PID Block Load reply"):
         dev.alloc(ff2mod.ET_SINE)
 
 
