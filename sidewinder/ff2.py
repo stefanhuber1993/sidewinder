@@ -26,7 +26,10 @@ Quick start::
     ff.close()
 """
 import time
-import hid
+
+from sidewinder._hidapi import import_hid
+
+hid = import_hid()   # plain `import hid`, plus a fallback for Homebrew hidapi on macOS
 
 from sidewinder.controls import (
     ButtonDown, ButtonUp, HatMoved, InputState,
@@ -414,12 +417,22 @@ class FF2Device:
         # Create New Effect — SET feature report
         self._h.send_feature_report(bytes([FR_CREATE_NEW_EFFECT, effect_type, 0x00, 0x00]))
         # PID Block Load — GET feature report (returns report_id + block + status + ram_lo + ram_hi)
-        resp = self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6)
+        resp = bytes(self._h.get_feature_report(FR_PID_BLOCK_LOAD, 6))
+        # Check the shape before trusting the offsets: a short reply, or one
+        # without the report ID in front, would otherwise be misread as a
+        # failed status (or an IndexError) with no hint of what came back.
+        if len(resp) < 3 or resp[0] != FR_PID_BLOCK_LOAD:
+            raise RuntimeError(
+                "Unexpected PID Block Load reply while allocating effect type "
+                f"0x{effect_type:02x}: {resp.hex(' ') or '(empty)'} -- expected "
+                f"at least 3 bytes starting with report ID 0x{FR_PID_BLOCK_LOAD:02x}"
+            )
         block, status = resp[1], resp[2]
         if status != 1:
             raise RuntimeError(
-                f"Effect block allocation failed: status={status} "
-                f"({'Full' if status == 2 else 'Error'})"
+                f"Effect block allocation failed for effect type 0x{effect_type:02x}: "
+                f"status={status} ({'Full' if status == 2 else 'Error'}), "
+                f"raw reply {resp.hex(' ')}"
             )
         return Effect(self, block, effect_type)
 

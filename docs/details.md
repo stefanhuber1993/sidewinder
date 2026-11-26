@@ -62,6 +62,14 @@ install hidapi yourself:
 | Arch | `sudo pacman -S hidapi` |
 | Windows | see [Platform support](#platform-support) — needs `hidapi.dll` |
 
+On Apple Silicon, Homebrew puts hidapi in `/opt/homebrew/lib`, which macOS does
+not search when `hid` asks for `libhidapi.dylib` by name. It only happens to work
+with a Python whose own library path includes that folder (pyenv or Homebrew
+Python usually do; Apple's `/usr/bin/python3` and the python.org installer do
+not). `sidewinder` therefore retries the import with the full path from
+`/opt/homebrew/lib`, `/usr/local/lib` or `/opt/local/lib` (MacPorts), so
+`brew install hidapi` is enough with any Python.
+
 The pygame demo needs one extra package, deliberately left out of
 `requirements.txt` because only the example uses it:
 

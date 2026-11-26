@@ -147,6 +147,15 @@ def test_alloc_raises_when_device_pool_is_full(dev):
         dev.alloc(ff2mod.ET_SINE)
 
 
+@pytest.mark.parametrize("reply", [b"", bytes([2, 1]), bytes([1, 1, 1, 0x17, 0x05])])
+def test_alloc_rejects_malformed_block_load_reply(dev, reply):
+    # Too short, or a different report ID in front: say what came back instead
+    # of reading the wrong byte as the status.
+    dev.fake.feature_responses[ff2mod.FR_PID_BLOCK_LOAD] = reply
+    with pytest.raises(RuntimeError, match="Unexpected PID Block Load reply"):
+        dev.alloc(ff2mod.ET_SINE)
+
+
 # ── Set Effect (report 0x01) ──────────────────────────────────────────────────
 
 def test_set_base_matches_descriptor_layout(dev):

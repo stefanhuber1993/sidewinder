@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidewinder"
-version = "0.1.0"
+version = "0.1.1"
 description = "Microsoft SideWinder Force Feedback 2 driver -- full HID PID protocol over hidapi, no sudo required."
 readme = "README.md"
 requires-python = ">=3.9"
